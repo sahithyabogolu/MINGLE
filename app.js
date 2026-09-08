@@ -206,15 +206,11 @@ function renderPendingRequests() {
   });
 
   pendingRequests.querySelectorAll(".admit-btn").forEach((button) => {
-    button.addEventListener("click", () => {
-      admitGuest(button.dataset.peer);
-    });
+    button.onclick = () => admitGuest(button.dataset.peer);
   });
 
   pendingRequests.querySelectorAll(".reject-btn").forEach((button) => {
-    button.addEventListener("click", () => {
-      rejectGuest(button.dataset.peer);
-    });
+    button.onclick = () => rejectGuest(button.dataset.peer);
   });
 }
 
@@ -222,17 +218,36 @@ function renderPendingRequests() {
    PEER CONNECTION
 ========================= */
 
+const PEER_OPTIONS = {
+  host: "0.peerjs.com",
+  port: 443,
+  path: "/",
+  secure: true,
+  debug: 2
+};
+
 function createPeer(customId = null) {
   return new Promise((resolve, reject) => {
-    let completed = false;
+    let settled = false;
 
-    state.peer = customId ? new Peer(customId) : new Peer();
+    state.peer = customId
+      ? new Peer(customId, PEER_OPTIONS)
+      : new Peer(PEER_OPTIONS);
+
+    const timeout = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error("Peer connection timed out."));
+      }
+    }, 20000);
 
     state.peer.on("open", (id) => {
+      clearTimeout(timeout);
+
       state.peerId = id;
 
-      if (!completed) {
-        completed = true;
+      if (!settled) {
+        settled = true;
         resolve(id);
       }
     });
@@ -248,8 +263,9 @@ function createPeer(customId = null) {
     state.peer.on("error", (error) => {
       console.error("PeerJS error:", error);
 
-      if (!completed) {
-        completed = true;
+      if (!settled) {
+        clearTimeout(timeout);
+        settled = true;
         reject(error);
         return;
       }
@@ -264,13 +280,33 @@ function createPeer(customId = null) {
           "Room not found. Check the room code and try again.",
           "error"
         );
+      } else if (error.type === "network") {
+        showToast(
+          "Network connection failed. Check your internet connection.",
+          "error"
+        );
       } else {
-        showToast("Connection problem. Please try again.", "error");
+        showToast(
+          "Connection problem. Please try again.",
+          "error"
+        );
       }
     });
 
     state.peer.on("disconnected", () => {
-      console.log("Peer disconnected");
+      console.warn("PeerJS disconnected.");
+
+      if (state.peer && !state.peer.destroyed) {
+        setTimeout(() => {
+          if (state.peer && !state.peer.destroyed) {
+            state.peer.reconnect();
+          }
+        }, 2000);
+      }
+    });
+
+    state.peer.on("close", () => {
+      console.warn("PeerJS connection closed.");
     });
   });
 }
@@ -281,7 +317,7 @@ function setupConnection(connection) {
   state.connections.set(connection.peer, connection);
 
   connection.on("open", () => {
-    console.log("Connected to:", connection.peer);
+    console.log("Connected to peer:", connection.peer);
   });
 
   connection.on("data", (payload) => {
@@ -298,7 +334,7 @@ function setupConnection(connection) {
   });
 
   connection.on("error", (error) => {
-    console.error("Connection error:", error);
+    console.error("Data connection error:", error);
   });
 }
 
@@ -307,14 +343,22 @@ function broadcast(payload, exceptPeerId = null) {
     if (peerId === exceptPeerId) return;
 
     if (connection.open) {
-      connection.send(payload);
+      try {
+        connection.send(payload);
+      } catch (error) {
+        console.error("Broadcast error:", error);
+      }
     }
   });
 }
 
 function sendToHost(payload) {
   if (state.connection && state.connection.open) {
-    state.connection.send(payload);
+    try {
+      state.connection.send(payload);
+    } catch (error) {
+      console.error("Host send error:", error);
+    }
   }
 }
 
@@ -408,12 +452,13 @@ async function createRoom() {
       "success"
     );
   } catch (error) {
-    console.error(error);
+    console.error("Create room error:", error);
 
     state.peer?.destroy();
     state.peer = null;
 
     setStatus("");
+
     showToast(
       "Could not create the room. Please try again.",
       "error"
@@ -445,14 +490,29 @@ async function joinRoom() {
   try {
     await createPeer();
 
-    const connection = state.peer.connect(state.hostPeerId, {
-      reliable: true
+    const connection = state.peer.connect(roomCode, {
+      reliable: true,
+      serialization: "json"
     });
 
     state.connection = connection;
     setupConnection(connection);
 
+    const connectionTimeout = setTimeout(() => {
+      if (!connection.open) {
+        showToast(
+          "Could not reach the host. Check the room code and internet connection.",
+          "error"
+        );
+
+        connection.close();
+        resetToLobby();
+      }
+    }, 20000);
+
     connection.on("open", () => {
+      clearTimeout(connectionTimeout);
+
       connection.send({
         type: "JOIN_REQUEST",
         username: state.username,
@@ -466,7 +526,10 @@ async function joinRoom() {
       showToast("Join request sent.");
     });
 
-    connection.on("error", () => {
+    connection.on("error", (error) => {
+      clearTimeout(connectionTimeout);
+      console.error("Join connection error:", error);
+
       showToast(
         "Room not found or host is offline. Check the room code.",
         "error"
@@ -475,7 +538,7 @@ async function joinRoom() {
       resetToLobby();
     });
   } catch (error) {
-    console.error(error);
+    console.error("Join room error:", error);
 
     showToast(
       "Room not found or host is offline. Check the room code.",
@@ -615,6 +678,8 @@ function sendChatMessage() {
 }
 
 function receiveChatMessage(message) {
+  if (!messagesContainer || !message) return;
+
   state.messages.push(message);
 
   const messageElement = document.createElement("div");
@@ -634,7 +699,7 @@ function receiveChatMessage(message) {
     </div>
 
     <div class="message-time">
-      ${message.timestamp}
+      ${escapeHtml(message.timestamp)}
     </div>
   `;
 
@@ -675,10 +740,11 @@ function setupTabs() {
 async function enableCamera() {
   try {
     if (!state.localStream) {
-      state.localStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true
-      });
+      state.localStream =
+        await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true
+        });
 
       localVideo.srcObject = state.localStream;
       localVideo.play().catch(() => {});
@@ -695,13 +761,15 @@ async function enableCamera() {
         callHost();
       }
 
-      showToast("Camera and microphone enabled.", "success");
+      showToast(
+        "Camera and microphone enabled.",
+        "success"
+      );
+
       return;
     }
 
-    const videoTracks = state.localStream.getVideoTracks();
-
-    videoTracks.forEach((track) => {
+    state.localStream.getVideoTracks().forEach((track) => {
       track.enabled = !track.enabled;
       state.cameraEnabled = track.enabled;
     });
@@ -717,6 +785,7 @@ async function enableCamera() {
     );
   } catch (error) {
     console.error(error);
+
     showToast(
       "Camera permission was denied or unavailable.",
       "error"
@@ -727,10 +796,11 @@ async function enableCamera() {
 async function toggleMic() {
   if (!state.localStream) {
     try {
-      state.localStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true
-      });
+      state.localStream =
+        await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true
+        });
 
       localVideo.srcObject = state.localStream;
       localVideo.play().catch(() => {});
@@ -747,7 +817,10 @@ async function toggleMic() {
         callHost();
       }
 
-      showToast("Microphone enabled.", "success");
+      showToast(
+        "Microphone enabled.",
+        "success"
+      );
     } catch (error) {
       showToast(
         "Microphone permission was denied or unavailable.",
@@ -758,9 +831,7 @@ async function toggleMic() {
     return;
   }
 
-  const audioTracks = state.localStream.getAudioTracks();
-
-  audioTracks.forEach((track) => {
+  state.localStream.getAudioTracks().forEach((track) => {
     track.enabled = !track.enabled;
     state.micEnabled = track.enabled;
   });
@@ -777,7 +848,9 @@ async function toggleMic() {
 }
 
 function callHost() {
-  if (!state.peer || !state.localStream) return;
+  if (!state.peer || !state.localStream || !state.hostPeerId) {
+    return;
+  }
 
   const call = state.peer.call(
     state.hostPeerId,
@@ -789,12 +862,18 @@ function callHost() {
   call.on("stream", (remoteStream) => {
     addRemoteVideo(state.hostPeerId, remoteStream);
   });
+
+  call.on("error", (error) => {
+    console.error("Call host error:", error);
+  });
 }
 
 function callAllParticipants() {
   if (!state.peer || !state.localStream) return;
 
   state.connections.forEach((connection) => {
+    if (!connection.open) return;
+
     const call = state.peer.call(
       connection.peer,
       state.localStream
@@ -805,10 +884,16 @@ function callAllParticipants() {
     call.on("stream", (remoteStream) => {
       addRemoteVideo(connection.peer, remoteStream);
     });
+
+    call.on("error", (error) => {
+      console.error("Participant call error:", error);
+    });
   });
 }
 
 function handleIncomingCall(call) {
+  if (!call) return;
+
   if (state.localStream) {
     call.answer(state.localStream);
   } else {
@@ -819,6 +904,10 @@ function handleIncomingCall(call) {
 
   call.on("stream", (remoteStream) => {
     addRemoteVideo(call.peer, remoteStream);
+  });
+
+  call.on("error", (error) => {
+    console.error("Incoming call error:", error);
   });
 }
 
@@ -832,6 +921,7 @@ function addRemoteVideo(peerId, stream) {
   if (!video) {
     const wrapper = document.createElement("div");
     wrapper.className = "video-card";
+    wrapper.dataset.peer = peerId;
 
     video = document.createElement("video");
     video.autoplay = true;
@@ -873,7 +963,6 @@ function setupCanvas() {
 
   canvas.onmousedown = (event) => {
     state.drawing = true;
-
     state.canvasContext.beginPath();
     state.canvasContext.moveTo(event.offsetX, event.offsetY);
   };
@@ -926,26 +1015,49 @@ function setupGame() {
   document.onkeydown = (event) => {
     const key = event.key.toLowerCase();
 
-    if (!["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(key)) {
+    if (
+      ![
+        "w",
+        "a",
+        "s",
+        "d",
+        "arrowup",
+        "arrowdown",
+        "arrowleft",
+        "arrowright"
+      ].includes(key)
+    ) {
       return;
     }
 
     event.preventDefault();
 
     if (key === "w" || key === "arrowup") {
-      state.gamePosition.y = Math.max(0, state.gamePosition.y - 3);
+      state.gamePosition.y = Math.max(
+        0,
+        state.gamePosition.y - 3
+      );
     }
 
     if (key === "s" || key === "arrowdown") {
-      state.gamePosition.y = Math.min(100, state.gamePosition.y + 3);
+      state.gamePosition.y = Math.min(
+        100,
+        state.gamePosition.y + 3
+      );
     }
 
     if (key === "a" || key === "arrowleft") {
-      state.gamePosition.x = Math.max(0, state.gamePosition.x - 3);
+      state.gamePosition.x = Math.max(
+        0,
+        state.gamePosition.x - 3
+      );
     }
 
     if (key === "d" || key === "arrowright") {
-      state.gamePosition.x = Math.min(100, state.gamePosition.x + 3);
+      state.gamePosition.x = Math.min(
+        100,
+        state.gamePosition.x + 3
+      );
     }
 
     player.style.left = `${state.gamePosition.x}%`;
@@ -1042,6 +1154,7 @@ function resetState() {
   state.localStream = null;
   state.cameraEnabled = false;
   state.micEnabled = false;
+  state.gamePosition = { x: 50, y: 50 };
 
   if (localVideo) {
     localVideo.srcObject = null;
@@ -1235,27 +1348,14 @@ showScreen("lobby");
     partyPanel = document.createElement("div");
     partyPanel.id = "partyGamesPanel";
 
-    partyPanel.style.cssText = `
-      margin: 18px 0;
-      padding: 18px;
-      border: 1px solid rgba(255,255,255,.12);
-      border-radius: 14px;
-      background: rgba(0,0,0,.18);
-    `;
-
     partyPanel.innerHTML = `
-      <h3 style="margin-top:0;">🎮 Party Games</h3>
+      <h3>🎮 Party Games</h3>
 
-      <p style="opacity:.75;font-size:13px;">
+      <p>
         Play multiplayer games with everyone in this room.
       </p>
 
-      <div id="partyGameButtons" style="
-        display:flex;
-        flex-wrap:wrap;
-        gap:8px;
-        margin-bottom:14px;
-      ">
+      <div id="partyGameButtons">
         <button type="button" data-party-game="spyfall">
           🕵️ Spyfall
         </button>
@@ -1270,7 +1370,7 @@ showScreen("lobby");
       </div>
 
       <div id="partyGameContent">
-        <p style="opacity:.7;">Choose a game to begin.</p>
+        <p>Choose a game to begin.</p>
       </div>
     `;
 
@@ -1281,14 +1381,19 @@ showScreen("lobby");
       return;
     }
 
-    gameBoard.parentElement.insertBefore(partyPanel, gameBoard);
+    gameBoard.parentElement.insertBefore(
+      partyPanel,
+      gameBoard
+    );
 
     partyPanel
       .querySelectorAll("[data-party-game]")
       .forEach((button) => {
-        button.addEventListener("click", () => {
+        button.onclick = () => {
           if (!isHostPlayer()) {
-            showPartyNotice("Only the room host can start a game.");
+            showPartyNotice(
+              "Only the room host can start a game."
+            );
             return;
           }
 
@@ -1305,7 +1410,7 @@ showScreen("lobby");
           if (selectedGame === "drawing") {
             startDrawingGame();
           }
-        });
+        };
       });
   }
 
@@ -1319,11 +1424,7 @@ showScreen("lobby");
 
   function showPartyNotice(message) {
     partyContent(`
-      <div style="
-        padding:12px;
-        border-radius:10px;
-        background:rgba(255,255,255,.06);
-      ">
+      <div class="party-notice">
         ${escapeHtml(message)}
       </div>
     `);
@@ -1334,10 +1435,7 @@ showScreen("lobby");
   ========================= */
 
   function startSpyfall() {
-    if (!isHostPlayer()) {
-      showPartyNotice("Only the room host can start Spyfall.");
-      return;
-    }
+    if (!isHostPlayer()) return;
 
     const players = participantNames();
 
@@ -1347,7 +1445,9 @@ showScreen("lobby");
     }
 
     const location =
-      spyLocations[Math.floor(Math.random() * spyLocations.length)];
+      spyLocations[
+        Math.floor(Math.random() * spyLocations.length)
+      ];
 
     const spy =
       players[Math.floor(Math.random() * players.length)];
@@ -1386,19 +1486,12 @@ showScreen("lobby");
     partyContent(`
       <h4>🕵️ Spyfall — Round ${partyState.round}</h4>
 
-      <div style="
-        padding:16px;
-        border-radius:12px;
-        margin:12px 0;
-        background:${
-          isSpy
-            ? "rgba(150,30,55,.25)"
-            : "rgba(255,255,255,.06)"
-        };
-      ">
+      <div class="party-role-card ${
+        isSpy ? "spy-card" : ""
+      }">
         <strong>Your role:</strong>
 
-        <div style="font-size:22px;margin-top:8px;">
+        <div class="party-role">
           ${
             isSpy
               ? "🕵️ YOU ARE THE SPY"
@@ -1424,7 +1517,7 @@ showScreen("lobby");
       </div>
 
       <p>
-        Ask suspicious questions and try to identify the spy.
+        Ask suspicious questions and identify the spy.
       </p>
 
       ${
@@ -1487,10 +1580,7 @@ showScreen("lobby");
   ========================= */
 
   function startTrivia() {
-    if (!isHostPlayer()) {
-      showPartyNotice("Only the room host can start Trivia.");
-      return;
-    }
+    if (!isHostPlayer()) return;
 
     partyState = {
       game: "trivia",
@@ -1526,6 +1616,7 @@ showScreen("lobby");
       return;
     }
 
+    partyState.questionIndex = index;
     partyState.answers = {};
 
     partyContent(`
@@ -1534,15 +1625,11 @@ showScreen("lobby");
         Question ${index + 1}/${triviaQuestions.length}
       </h4>
 
-      <p style="font-size:18px;font-weight:600;">
+      <p class="trivia-question">
         ${escapeHtml(question.question)}
       </p>
 
-      <div id="triviaOptions" style="
-        display:flex;
-        flex-direction:column;
-        gap:8px;
-      ">
+      <div id="triviaOptions">
         ${question.options
           .map(
             (option) => `
@@ -1557,7 +1644,7 @@ showScreen("lobby");
           .join("")}
       </div>
 
-      <p id="triviaStatus" style="opacity:.7;">
+      <p id="triviaStatus">
         Choose one answer.
       </p>
     `);
@@ -1565,7 +1652,7 @@ showScreen("lobby");
     partyPanel
       ?.querySelectorAll("[data-trivia-answer]")
       .forEach((button) => {
-        button.addEventListener("click", () => {
+        button.onclick = () => {
           const answer = button.dataset.triviaAnswer;
 
           partyPanel
@@ -1589,7 +1676,7 @@ showScreen("lobby");
               answer
             });
           }
-        });
+        };
       });
   }
 
@@ -1626,9 +1713,7 @@ showScreen("lobby");
     if (
       Object.keys(partyState.answers).length >= totalPlayers
     ) {
-      setTimeout(() => {
-        nextTriviaQuestion();
-      }, 800);
+      setTimeout(nextTriviaQuestion, 800);
     }
   }
 
@@ -1704,12 +1789,7 @@ showScreen("lobby");
   ========================= */
 
   function startDrawingGame() {
-    if (!isHostPlayer()) {
-      showPartyNotice(
-        "Only the room host can start Guess the Drawing."
-      );
-      return;
-    }
+    if (!isHostPlayer()) return;
 
     const players = participantNames();
 
@@ -1767,14 +1847,10 @@ showScreen("lobby");
       ${
         isDrawer
           ? `
-            <div style="
-              padding:12px;
-              border-radius:10px;
-              background:rgba(150,30,55,.25);
-            ">
-              Your word is:
+            <div class="party-role-card spy-card">
+              <p>Your word is:</p>
 
-              <strong style="font-size:20px;">
+              <strong class="drawing-word">
                 ${escapeHtml(secretWord)}
               </strong>
 
@@ -1784,12 +1860,8 @@ showScreen("lobby");
             </div>
           `
           : `
-            <div style="
-              padding:12px;
-              border-radius:10px;
-              background:rgba(255,255,255,.06);
-            ">
-              Watch the shared canvas and type your guesses
+            <div class="party-role-card">
+              Watch the shared canvas and type guesses
               in chat.
             </div>
           `
@@ -1908,7 +1980,6 @@ showScreen("lobby");
     if (payload.action === "TRIVIA_SCORE_UPDATE") {
       partyState.scores =
         payload.scores || partyState.scores;
-
       return;
     }
 
@@ -1976,10 +2047,6 @@ showScreen("lobby");
       renderDrawingResults(payload.secretWord);
     }
   }
-
-  /* =========================
-     CONNECT PARTY GAMES
-  ========================= */
 
   const originalHandlePayload = handlePayload;
 
