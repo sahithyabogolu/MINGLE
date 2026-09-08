@@ -1,17 +1,21 @@
 :root {
-  --background: #16090f;
-  --surface: #241018;
-  --surface-light: #321522;
-  --surface-hover: #421b2b;
-  --primary: #8f304f;
-  --primary-hover: #ad4163;
-  --accent: #d9829b;
-  --text: #fff4f6;
-  --text-muted: #c8aeb7;
-  --border: #51303d;
-  --danger: #c95768;
-  --success: #72b79b;
-  --shadow: 0 18px 50px rgba(0, 0, 0, 0.25);
+  --background: #180811;
+  --surface: #2b111d;
+  --surface-light: #3d1828;
+  --surface-hover: #552238;
+
+  --primary: #a83d62;
+  --primary-hover: #c9577d;
+  --accent: #ed91ad;
+
+  --text: #fff7fa;
+  --text-muted: #d9b6c3;
+
+  --border: #71364f;
+  --danger: #d65d73;
+  --success: #7ac5a4;
+
+  --shadow: 0 18px 50px rgba(0, 0, 0, 0.4);
 }
 
 * {
@@ -33,6 +37,27 @@ input {
 
 button {
   cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 11px 15px;
+  background: var(--primary);
+  color: #fff7fa;
+  font-weight: 700;
+  transition: 0.2s ease;
+}
+
+button:hover {
+  background: var(--primary-hover);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+button:disabled {
+  background: #6b5360;
+  color: #d8c8ce;
+  cursor: not-allowed;
+  opacity: 0.8;
+  transform: none;
 }
 
 .hidden {
@@ -108,22 +133,19 @@ input {
   outline: none;
 }
 
+input::placeholder {
+  color: #cba8b7;
+}
+
 input:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(237, 145, 173, 0.15);
 }
 
 .button-row {
   display: flex;
   gap: 10px;
   margin-top: 26px;
-}
-
-button {
-  border: 0;
-  border-radius: 9px;
-  padding: 11px 15px;
-  color: var(--text);
-  transition: 0.2s;
 }
 
 .primary-btn {
@@ -398,9 +420,15 @@ button {
   white-space: nowrap;
 }
 
-.tab.active {
+.tab:hover {
   color: var(--accent);
-  border-bottom-color: var(--accent);
+  background: transparent;
+  transform: none;
+}
+
+.tab.active {
+  color: #f19ab4;
+  border-bottom-color: #f19ab4;
 }
 
 .tab-panel {
@@ -480,7 +508,7 @@ video {
   position: absolute;
   bottom: 12px;
   left: 12px;
-  background: rgba(22, 9, 15, 0.8);
+  background: rgba(22, 9, 15, 0.85);
   padding: 6px 9px;
   border-radius: 7px;
   font-size: 12px;
@@ -504,46 +532,109 @@ video {
   color: var(--text-muted);
 }
 
+/* Drawing canvas */
 #canvas {
   max-width: 100%;
-  background: #fff;
+  background: #fffafd;
+  border: 2px solid #8b4965;
   border-radius: 10px;
   margin-top: 20px;
 }
 
+/* Main movement game */
 #gameBoard {
   position: relative;
   width: min(600px, 100%);
   height: 300px;
-  background: var(--surface-light);
-  border: 1px solid var(--border);
+  background: #3d1828;
+  border: 1px solid #8b4965;
   margin: 25px auto 0;
   border-radius: 12px;
+  box-shadow: inset 0 0 25px rgba(0, 0, 0, 0.25);
 }
 
 #player {
   position: absolute;
   width: 24px;
   height: 24px;
-  background: var(--accent);
+  background: #f08aaa;
+  border: 2px solid #fff0f5;
   border-radius: 6px;
   left: 20px;
   top: 20px;
+  box-shadow: 0 0 12px rgba(237, 145, 173, 0.7);
 }
 
+/* Party games */
+#partyGamesPanel {
+  background: #321522 !important;
+  border: 1px solid #71364f !important;
+  color: var(--text);
+  border-radius: 16px;
+  padding: 24px;
+}
+
+#partyGamesPanel button {
+  background: var(--primary) !important;
+  color: #fff7fa !important;
+  border: 1px solid var(--accent) !important;
+  font-weight: 700;
+}
+
+#partyGamesPanel button:hover {
+  background: var(--primary-hover) !important;
+}
+
+#partyGamesPanel .party-notice,
+#partyGamesPanel .game-notice,
+#partyGamesPanel .notice {
+  background: #4a2032;
+  color: #fff1f5;
+  border: 1px solid #7f405b;
+  border-radius: 10px;
+  padding: 14px;
+}
+
+#partyGamesPanel h3,
+#partyGamesPanel h4 {
+  color: #fff7fa;
+}
+
+/* Toast */
 .toast {
   position: fixed;
   right: 25px;
   bottom: 25px;
   background: var(--surface-light);
   border: 1px solid var(--border);
+  color: var(--text);
   padding: 13px 17px;
   border-radius: 10px;
   display: none;
+  box-shadow: var(--shadow);
 }
 
 .toast.show {
   display: block;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--background);
+}
+
+::-webkit-scrollbar-thumb {
+  background: #71364f;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--primary);
 }
 
 @media (max-width: 800px) {
@@ -567,5 +658,17 @@ video {
 
   .leave-btn {
     margin-top: 15px;
+  }
+
+  .button-row,
+  .message-form,
+  .call-controls {
+    flex-wrap: wrap;
+  }
+
+  .button-row button,
+  .message-form button,
+  .call-controls button {
+    flex: 1;
   }
 }
