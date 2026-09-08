@@ -1,1 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MINGLE</title>
 
+  <link rel="stylesheet" href="style.css" />
+
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+</head>
+<body>
+
+  <main id="lobby" class="screen">
+    <div class="brand">
+      <div class="logo">🍷</div>
+      <h1>MINGLE</h1>
+      <p>Connect. Converse. Create memories.</p>
+    </div>
+
+    <section class="card lobby-card">
+      <h2>Enter MINGLE</h2>
+      <p class="muted">Create a room or join someone else's room.</p>
+
+      <label for="username">Your name</label>
+      <input id="username" maxlength="24" placeholder="Enter your name" />
+
+      <label for="roomCode">Room code</label>
+      <input
+        id="roomCode"
+        maxlength="8"
+        placeholder="Enter room code to join"
+        autocomplete="off"
+      />
+
+      <div class="button-row">
+        <button id="createRoomBtn" class="primary-btn">Create Room</button>
+        <button id="joinRoomBtn" class="secondary-btn">Join Room</button>
+      </div>
+
+      <p id="lobbyStatus" class="status"></p>
+    </section>
+  </main>
+
+  <main id="waiting" class="screen hidden">
+    <div class="brand">
+      <div class="logo">🍷</div>
+      <h1>MINGLE</h1>
+    </div>
+
+    <section class="card waiting-card">
+      <div class="waiting-icon">⏳</div>
+      <h2>Waiting for admission</h2>
+      <p id="waitingText">
+        Your request has been sent to the host.
+        You will enter the room once the host admits you.
+      </p>
+      <button id="cancelRequestBtn" class="danger-btn">
+        Cancel Request
+      </button>
+    </section>
+  </main>
+
+  <main id="app" class="app-shell hidden">
+
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="small-logo">🍷</div>
+        <div>
+          <strong>MINGLE</strong>
+          <span>Private social space</span>
+        </div>
+      </div>
+
+      <div class="room-box">
+        <span class="label">ROOM CODE</span>
+        <div class="room-code-line">
+          <strong id="displayRoomCode">------</strong>
+          <button id="copyRoomBtn" class="copy-btn">Copy</button>
+        </div>
+        <p id="copyStatus"></p>
+      </div>
+
+      <section id="pendingSection" class="side-section hidden">
+        <div class="section-heading">
+          <h3>Pending Requests</h3>
+          <span id="pendingCount" class="count">0</span>
+        </div>
+        <div id="pendingRequests"></div>
+      </section>
+
+      <section class="side-section">
+        <div class="section-heading">
+          <h3>Participants</h3>
+          <span id="participantCount" class="count">1</span>
+        </div>
+        <div id="participants"></div>
+      </section>
+
+      <button id="leaveRoomBtn" class="leave-btn">Leave Room</button>
+    </aside>
+
+    <section class="main-content">
+      <header class="topbar">
+        <div>
+          <h2 id="roomTitle">MINGLE Room</h2>
+          <p id="connectionStatus">Connected</p>
+        </div>
+        <div class="user-pill">
+          <span class="online-dot"></span>
+          <span id="currentUserName"></span>
+        </div>
+      </header>
+
+      <nav class="tabs">
+        <button class="tab active" data-tab="chat">Group Chat</button>
+        <button class="tab" data-tab="private">Private Chat</button>
+        <button class="tab" data-tab="calls">Video & Voice</button>
+        <button class="tab" data-tab="canvas">Shared Canvas</button>
+        <button class="tab" data-tab="games">Games</button>
+      </nav>
+
+      <section id="chatTab" class="tab-panel active">
+        <div id="messages" class="messages"></div>
+
+        <form id="chatForm" class="message-form">
+          <input id="chatInput" placeholder="Write a message..." maxlength="500" />
+          <button class="primary-btn" type="submit">Send</button>
+        </form>
+      </section>
+
+      <section id="privateTab" class="tab-panel">
+        <div class="empty-state">
+          <h3>Private Chat</h3>
+          <p>Select an admitted participant to start a private conversation.</p>
+          <div id="privateUsers"></div>
+        </div>
+      </section>
+
+      <section id="callsTab" class="tab-panel">
+        <div class="video-grid">
+          <div class="video-card">
+            <video id="localVideo" autoplay muted playsinline></video>
+            <span>You</span>
+          </div>
+          <div id="remoteVideos" class="remote-videos"></div>
+        </div>
+
+        <div class="call-controls">
+          <button id="cameraBtn" class="secondary-btn">Enable Camera</button>
+          <button id="micBtn" class="secondary-btn">Enable Mic</button>
+        </div>
+      </section>
+
+      <section id="canvasTab" class="tab-panel">
+        <div class="empty-state">
+          <h3>Shared Canvas</h3>
+          <p>Canvas collaboration will be available inside the room.</p>
+          <canvas id="canvas" width="800" height="450"></canvas>
+        </div>
+      </section>
+
+      <section id="gamesTab" class="tab-panel">
+        <div class="empty-state">
+          <h3>Game Sync</h3>
+          <p>Use WASD or arrow keys to move.</p>
+          <div id="gameBoard">
+            <div id="player"></div>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
