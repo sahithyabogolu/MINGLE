@@ -1,3 +1,7 @@
+/* =========================================================
+   MINGLE - Main Application Script (Production-Ready WebRTC)
+   ========================================================= */
+
 const state = {
   peer: null,
   peerId: null,
@@ -6,7 +10,7 @@ const state = {
   username: "",
   isHost: false,
   connection: null,
-  connections: new Map(),
+  connections: new Map(), // Host tracks guest connections
   pendingRequests: new Map(),
   participants: [],
   messages: [],
@@ -53,6 +57,42 @@ const micBtn = $("micBtn");
 const localVideo = $("localVideo");
 const remoteVideos = $("remoteVideos");
 
+/* =========================
+   ICE & PEER CONFIGURATION
+========================= */
+
+// Free STUN/TURN servers to allow cross-network NAT traversal
+const PEER_CONFIG = {
+  host: "0.peerjs.com",
+  port: 443,
+  path: "/",
+  secure: true,
+  debug: 1,
+  config: {
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" },
+      { urls: "stun:stun2.l.google.com:19302" },
+      { urls: "stun:stun.cloudflare.com:3478" },
+      // Open relay fallback for strict firewalls/Symmetric NAT
+      {
+        urls: "turn:openrelay.metered.ca:80",
+        username: "openrelay",
+        credential: "openrelay"
+      },
+      {
+        urls: "turn:openrelay.metered.ca:443",
+        username: "openrelay",
+        credential: "openrelay"
+      }
+    ]
+  }
+};
+
+function getRoomPeerId(code) {
+  return `mingle-room-${code.toUpperCase().trim()}`;
+}
+
 function showScreen(screenName) {
   Object.values(screens).forEach((screen) => {
     if (screen) screen.classList.add("hidden");
@@ -84,10 +124,12 @@ function setStatus(message) {
 }
 
 function generateRoomCode() {
-  return Math.random()
-    .toString(36)
-    .substring(2, 8)
-    .toUpperCase();
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let result = "";
+  for (let i = 0; i < 6; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
 }
 
 function escapeHtml(value) {
@@ -100,33 +142,24 @@ function escapeHtml(value) {
 }
 
 /* =========================
-   PARTICIPANTS
+   PARTICIPANTS MANAGEMENT
 ========================= */
 
 function addParticipant(id, name, isHost = false) {
-  const existing = state.participants.find(
-    (participant) => participant.id === id
-  );
+  const existing = state.participants.find((p) => p.id === id);
 
   if (existing) {
     existing.name = name;
     existing.isHost = isHost;
   } else {
-    state.participants.push({
-      id,
-      name,
-      isHost
-    });
+    state.participants.push({ id, name, isHost });
   }
 
   renderParticipants();
 }
 
 function removeParticipant(id) {
-  state.participants = state.participants.filter(
-    (participant) => participant.id !== id
-  );
-
+  state.participants = state.participants.filter((p) => p.id !== id);
   renderParticipants();
 }
 
@@ -143,7 +176,6 @@ function renderParticipants() {
       <span class="participant-avatar">
         ${escapeHtml(participant.name.charAt(0).toUpperCase())}
       </span>
-
       <span class="participant-name">
         ${escapeHtml(participant.name)}
         ${participant.isHost ? "<small>Host</small>" : ""}
@@ -159,7 +191,7 @@ function renderParticipants() {
 }
 
 /* =========================
-   PENDING REQUESTS
+   PENDING REQUESTS (HOST)
 ========================= */
 
 function renderPendingRequests() {
@@ -176,8 +208,7 @@ function renderPendingRequests() {
   }
 
   if (state.pendingRequests.size === 0) {
-    pendingRequests.innerHTML =
-      '<p class="empty-state">No pending requests</p>';
+    pendingRequests.innerHTML = '<p class="empty-state">No pending requests</p>';
     return;
   }
 
@@ -190,15 +221,9 @@ function renderPendingRequests() {
         <strong>${escapeHtml(request.username)}</strong>
         <small>Wants to join</small>
       </div>
-
       <div class="request-actions">
-        <button class="admit-btn" data-peer="${peerId}">
-          Admit
-        </button>
-
-        <button class="reject-btn" data-peer="${peerId}">
-          Reject
-        </button>
+        <button class="admit-btn" data-peer="${peerId}">Admit</button>
+        <button class="reject-btn" data-peer="${peerId}">Reject</button>
       </div>
     `;
 
@@ -215,37 +240,27 @@ function renderPendingRequests() {
 }
 
 /* =========================
-   PEER CONNECTION
+   PEERJS CORE SETUP
 ========================= */
-
-const PEER_OPTIONS = {
-  host: "0.peerjs.com",
-  port: 443,
-  path: "/",
-  secure: true,
-  debug: 2
-};
 
 function createPeer(customId = null) {
   return new Promise((resolve, reject) => {
     let settled = false;
 
     state.peer = customId
-      ? new Peer(customId, PEER_OPTIONS)
-      : new Peer(PEER_OPTIONS);
+      ? new Peer(customId, PEER_CONFIG)
+      : new Peer(PEER_CONFIG);
 
     const timeout = setTimeout(() => {
       if (!settled) {
         settled = true;
-        reject(new Error("Peer connection timed out."));
+        reject(new Error("Peer connection timed out reaching signaling server."));
       }
-    }, 20000);
+    }, 15000);
 
     state.peer.on("open", (id) => {
       clearTimeout(timeout);
-
       state.peerId = id;
-
       if (!settled) {
         settled = true;
         resolve(id);
@@ -271,42 +286,18 @@ function createPeer(customId = null) {
       }
 
       if (error.type === "unavailable-id") {
-        showToast(
-          "That room code is already being used. Create another room.",
-          "error"
-        );
+        showToast("That room code is currently active. Try creating again.", "error");
       } else if (error.type === "peer-unavailable") {
-        showToast(
-          "Room not found. Check the room code and try again.",
-          "error"
-        );
-      } else if (error.type === "network") {
-        showToast(
-          "Network connection failed. Check your internet connection.",
-          "error"
-        );
+        showToast("Room not found or host is offline.", "error");
       } else {
-        showToast(
-          "Connection problem. Please try again.",
-          "error"
-        );
+        showToast("Network/WebRTC connection issue occurred.", "error");
       }
     });
 
     state.peer.on("disconnected", () => {
-      console.warn("PeerJS disconnected.");
-
       if (state.peer && !state.peer.destroyed) {
-        setTimeout(() => {
-          if (state.peer && !state.peer.destroyed) {
-            state.peer.reconnect();
-          }
-        }, 2000);
+        state.peer.reconnect();
       }
-    });
-
-    state.peer.on("close", () => {
-      console.warn("PeerJS connection closed.");
     });
   });
 }
@@ -317,7 +308,7 @@ function setupConnection(connection) {
   state.connections.set(connection.peer, connection);
 
   connection.on("open", () => {
-    console.log("Connected to peer:", connection.peer);
+    console.log("Data channel open with:", connection.peer);
   });
 
   connection.on("data", (payload) => {
@@ -331,17 +322,26 @@ function setupConnection(connection) {
 
     removeParticipant(connection.peer);
     renderPendingRequests();
+
+    if (state.isHost) {
+      broadcast({
+        type: "PARTICIPANTS_UPDATE",
+        participants: state.participants
+      });
+    } else if (connection.peer === state.hostPeerId) {
+      showToast("Host left the room. Session ended.", "error");
+      resetToLobby();
+    }
   });
 
-  connection.on("error", (error) => {
-    console.error("Data connection error:", error);
+  connection.on("error", (err) => {
+    console.error("Connection error:", err);
   });
 }
 
 function broadcast(payload, exceptPeerId = null) {
   state.connections.forEach((connection, peerId) => {
     if (peerId === exceptPeerId) return;
-
     if (connection.open) {
       try {
         connection.send(payload);
@@ -357,13 +357,13 @@ function sendToHost(payload) {
     try {
       state.connection.send(payload);
     } catch (error) {
-      console.error("Host send error:", error);
+      console.error("Send to host error:", error);
     }
   }
 }
 
 /* =========================
-   PAYLOAD HANDLING
+   PAYLOAD & EVENT HANDLING
 ========================= */
 
 function handlePayload(payload, connection) {
@@ -385,14 +385,13 @@ function handlePayload(payload, connection) {
 
     case "CHAT_MESSAGE":
       receiveChatMessage(payload.message);
-
       if (state.isHost) {
         broadcast(payload, connection.peer);
       }
       break;
 
     case "REJECTED":
-      showToast("The host rejected your request.", "error");
+      showToast("The host rejected your join request.", "error");
       resetToLobby();
       break;
 
@@ -406,16 +405,22 @@ function handlePayload(payload, connection) {
 
     case "CANVAS_UPDATE":
       drawRemoteCanvas(payload);
+      if (state.isHost) {
+        broadcast(payload, connection.peer);
+      }
       break;
 
     case "GAME_UPDATE":
       updateRemoteGame(payload);
+      if (state.isHost) {
+        broadcast(payload, connection.peer);
+      }
       break;
   }
 }
 
 /* =========================
-   ROOM CREATION / JOINING
+   ROOM CREATION & JOINING
 ========================= */
 
 async function createRoom() {
@@ -429,12 +434,12 @@ async function createRoom() {
   state.username = username;
   state.isHost = true;
   state.roomCode = generateRoomCode();
-  state.hostPeerId = state.roomCode;
+  state.hostPeerId = getRoomPeerId(state.roomCode);
 
   setStatus("Creating room...");
 
   try {
-    await createPeer(state.roomCode);
+    await createPeer(state.hostPeerId);
 
     addParticipant(state.peerId, state.username, true);
 
@@ -446,23 +451,15 @@ async function createRoom() {
     renderParticipants();
     renderPendingRequests();
     setupAllFeatures();
-
-    showToast(
-      `Room created. Share code ${state.roomCode} with your friend.`,
-      "success"
-    );
-  } catch (error) {
-    console.error("Create room error:", error);
-
-    state.peer?.destroy();
-    state.peer = null;
-
     setStatus("");
 
-    showToast(
-      "Could not create the room. Please try again.",
-      "error"
-    );
+    showToast(`Room created! Share code: ${state.roomCode}`, "success");
+  } catch (error) {
+    console.error("Create room error:", error);
+    if (state.peer) state.peer.destroy();
+    state.peer = null;
+    setStatus("");
+    showToast("Could not create room. Try again.", "error");
   }
 }
 
@@ -482,15 +479,15 @@ async function joinRoom() {
 
   state.username = username;
   state.roomCode = roomCode;
-  state.hostPeerId = roomCode;
+  state.hostPeerId = getRoomPeerId(roomCode);
   state.isHost = false;
 
-  setStatus("Connecting to room...");
+  setStatus("Connecting to host...");
 
   try {
     await createPeer();
 
-    const connection = state.peer.connect(roomCode, {
+    const connection = state.peer.connect(state.hostPeerId, {
       reliable: true,
       serialization: "json"
     });
@@ -500,18 +497,15 @@ async function joinRoom() {
 
     const connectionTimeout = setTimeout(() => {
       if (!connection.open) {
-        showToast(
-          "Could not reach the host. Check the room code and internet connection.",
-          "error"
-        );
-
+        showToast("Host unreachable. Check the code or internet connection.", "error");
         connection.close();
         resetToLobby();
       }
-    }, 20000);
+    }, 15000);
 
     connection.on("open", () => {
       clearTimeout(connectionTimeout);
+      setStatus("");
 
       connection.send({
         type: "JOIN_REQUEST",
@@ -519,32 +513,20 @@ async function joinRoom() {
         roomCode: state.roomCode
       });
 
-      $("waitingText").textContent =
-        `Your request has been sent to the host of room ${state.roomCode}.`;
-
+      $("waitingText").textContent = `Your request has been sent to room ${state.roomCode}. Waiting for approval...`;
       showScreen("waiting");
-      showToast("Join request sent.");
     });
 
-    connection.on("error", (error) => {
+    connection.on("error", (err) => {
       clearTimeout(connectionTimeout);
-      console.error("Join connection error:", error);
-
-      showToast(
-        "Room not found or host is offline. Check the room code.",
-        "error"
-      );
-
+      console.error("Join error:", err);
+      showToast("Could not connect to room host.", "error");
       resetToLobby();
     });
   } catch (error) {
     console.error("Join room error:", error);
-
-    showToast(
-      "Room not found or host is offline. Check the room code.",
-      "error"
-    );
-
+    setStatus("");
+    showToast("Room not found or host is offline.", "error");
     resetToLobby();
   }
 }
@@ -558,17 +540,14 @@ function handleJoinRequest(payload, connection) {
   });
 
   renderPendingRequests();
-
-  showToast(`${payload.username} wants to join your room.`);
+  showToast(`${payload.username} requested to join.`);
 }
 
 function admitGuest(peerId) {
   const request = state.pendingRequests.get(peerId);
-
   if (!request) return;
 
   state.pendingRequests.delete(peerId);
-
   addParticipant(peerId, request.username, false);
 
   request.connection.send({
@@ -583,13 +562,18 @@ function admitGuest(peerId) {
   });
 
   renderPendingRequests();
-
   showToast(`${request.username} admitted.`, "success");
+
+  // Call guest if media stream is active
+  if (state.localStream) {
+    const call = state.peer.call(peerId, state.localStream);
+    state.calls.set(peerId, call);
+    call.on("stream", (remoteStream) => addRemoteVideo(peerId, remoteStream));
+  }
 }
 
 function rejectGuest(peerId) {
   const request = state.pendingRequests.get(peerId);
-
   if (!request) return;
 
   request.connection.send({
@@ -597,7 +581,7 @@ function rejectGuest(peerId) {
     approved: false
   });
 
-  request.connection.close();
+  setTimeout(() => request.connection.close(), 500);
   state.pendingRequests.delete(peerId);
 
   renderPendingRequests();
@@ -606,14 +590,14 @@ function rejectGuest(peerId) {
 
 function handleJoinResponse(payload) {
   if (!payload.approved) {
-    showToast("Your request was rejected.", "error");
+    showToast("Your request was declined by host.", "error");
     resetToLobby();
     return;
   }
 
   state.participants = payload.participants || [];
 
-  if (!state.participants.some((person) => person.id === state.peerId)) {
+  if (!state.participants.some((p) => p.id === state.peerId)) {
     state.participants.push({
       id: state.peerId,
       name: state.username,
@@ -629,11 +613,11 @@ function handleJoinResponse(payload) {
   showScreen("app");
   setupAllFeatures();
 
-  showToast("You have been admitted!", "success");
+  showToast("Welcome to MINGLE!", "success");
 }
 
 /* =========================
-   CHAT
+   CHAT FEATURE
 ========================= */
 
 function setupChat() {
@@ -647,7 +631,6 @@ function setupChat() {
 
 function sendChatMessage() {
   const text = messageInput.value.trim();
-
   if (!text) return;
 
   const message = {
@@ -683,24 +666,12 @@ function receiveChatMessage(message) {
   state.messages.push(message);
 
   const messageElement = document.createElement("div");
-
-  messageElement.className =
-    message.senderId === state.peerId
-      ? "message own-message"
-      : "message";
+  messageElement.className = message.senderId === state.peerId ? "message own-message" : "message";
 
   messageElement.innerHTML = `
-    <div class="message-sender">
-      ${escapeHtml(message.sender)}
-    </div>
-
-    <div class="message-text">
-      ${escapeHtml(message.text)}
-    </div>
-
-    <div class="message-time">
-      ${escapeHtml(message.timestamp)}
-    </div>
+    <div class="message-sender">${escapeHtml(message.sender)}</div>
+    <div class="message-text">${escapeHtml(message.text)}</div>
+    <div class="message-time">${escapeHtml(message.timestamp)}</div>
   `;
 
   messagesContainer.appendChild(messageElement);
@@ -708,7 +679,7 @@ function receiveChatMessage(message) {
 }
 
 /* =========================
-   TABS
+   NAVIGATION TABS
 ========================= */
 
 function setupTabs() {
@@ -724,27 +695,23 @@ function setupTabs() {
       });
 
       tabPanels.forEach((panel) => {
-        panel.classList.toggle(
-          "active",
-          panel.id === `${tabName}Tab`
-        );
+        panel.classList.toggle("active", panel.id === `${tabName}Tab`);
       });
     };
   });
 }
 
 /* =========================
-   CAMERA AND MICROPHONE
+   CAMERA & MICROPHONE (WEBRTC)
 ========================= */
 
 async function enableCamera() {
   try {
     if (!state.localStream) {
-      state.localStream =
-        await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true
-        });
+      state.localStream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true
+      });
 
       localVideo.srcObject = state.localStream;
       localVideo.play().catch(() => {});
@@ -761,11 +728,7 @@ async function enableCamera() {
         callHost();
       }
 
-      showToast(
-        "Camera and microphone enabled.",
-        "success"
-      );
-
+      showToast("Camera and microphone enabled.", "success");
       return;
     }
 
@@ -774,60 +737,17 @@ async function enableCamera() {
       state.cameraEnabled = track.enabled;
     });
 
-    cameraBtn.textContent = state.cameraEnabled
-      ? "Disable Camera"
-      : "Enable Camera";
-
-    showToast(
-      state.cameraEnabled
-        ? "Camera enabled."
-        : "Camera disabled."
-    );
+    cameraBtn.textContent = state.cameraEnabled ? "Disable Camera" : "Enable Camera";
+    showToast(state.cameraEnabled ? "Camera enabled." : "Camera disabled.");
   } catch (error) {
     console.error(error);
-
-    showToast(
-      "Camera permission was denied or unavailable.",
-      "error"
-    );
+    showToast("Camera permission denied or device not found.", "error");
   }
 }
 
 async function toggleMic() {
   if (!state.localStream) {
-    try {
-      state.localStream =
-        await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true
-        });
-
-      localVideo.srcObject = state.localStream;
-      localVideo.play().catch(() => {});
-
-      state.cameraEnabled = true;
-      state.micEnabled = true;
-
-      cameraBtn.textContent = "Disable Camera";
-      micBtn.textContent = "Disable Mic";
-
-      if (state.isHost) {
-        callAllParticipants();
-      } else {
-        callHost();
-      }
-
-      showToast(
-        "Microphone enabled.",
-        "success"
-      );
-    } catch (error) {
-      showToast(
-        "Microphone permission was denied or unavailable.",
-        "error"
-      );
-    }
-
+    await enableCamera();
     return;
   }
 
@@ -836,35 +756,18 @@ async function toggleMic() {
     state.micEnabled = track.enabled;
   });
 
-  micBtn.textContent = state.micEnabled
-    ? "Disable Mic"
-    : "Enable Mic";
-
-  showToast(
-    state.micEnabled
-      ? "Microphone enabled."
-      : "Microphone disabled."
-  );
+  micBtn.textContent = state.micEnabled ? "Disable Mic" : "Enable Mic";
+  showToast(state.micEnabled ? "Microphone enabled." : "Microphone disabled.");
 }
 
 function callHost() {
-  if (!state.peer || !state.localStream || !state.hostPeerId) {
-    return;
-  }
+  if (!state.peer || !state.localStream || !state.hostPeerId) return;
 
-  const call = state.peer.call(
-    state.hostPeerId,
-    state.localStream
-  );
-
+  const call = state.peer.call(state.hostPeerId, state.localStream);
   state.calls.set(state.hostPeerId, call);
 
   call.on("stream", (remoteStream) => {
     addRemoteVideo(state.hostPeerId, remoteStream);
-  });
-
-  call.on("error", (error) => {
-    console.error("Call host error:", error);
   });
 }
 
@@ -874,19 +777,11 @@ function callAllParticipants() {
   state.connections.forEach((connection) => {
     if (!connection.open) return;
 
-    const call = state.peer.call(
-      connection.peer,
-      state.localStream
-    );
-
+    const call = state.peer.call(connection.peer, state.localStream);
     state.calls.set(connection.peer, call);
 
     call.on("stream", (remoteStream) => {
       addRemoteVideo(connection.peer, remoteStream);
-    });
-
-    call.on("error", (error) => {
-      console.error("Participant call error:", error);
     });
   });
 }
@@ -905,18 +800,12 @@ function handleIncomingCall(call) {
   call.on("stream", (remoteStream) => {
     addRemoteVideo(call.peer, remoteStream);
   });
-
-  call.on("error", (error) => {
-    console.error("Incoming call error:", error);
-  });
 }
 
 function addRemoteVideo(peerId, stream) {
   if (!remoteVideos) return;
 
-  let video = document.querySelector(
-    `video[data-peer="${peerId}"]`
-  );
+  let video = document.querySelector(`video[data-peer="${peerId}"]`);
 
   if (!video) {
     const wrapper = document.createElement("div");
@@ -941,13 +830,8 @@ function addRemoteVideo(peerId, stream) {
 }
 
 function setupMediaControls() {
-  if (cameraBtn) {
-    cameraBtn.onclick = enableCamera;
-  }
-
-  if (micBtn) {
-    micBtn.onclick = toggleMic;
-  }
+  if (cameraBtn) cameraBtn.onclick = enableCamera;
+  if (micBtn) micBtn.onclick = toggleMic;
 }
 
 /* =========================
@@ -956,7 +840,6 @@ function setupMediaControls() {
 
 function setupCanvas() {
   const canvas = $("canvas");
-
   if (!canvas) return;
 
   state.canvasContext = canvas.getContext("2d");
@@ -986,18 +869,12 @@ function setupCanvas() {
     }
   };
 
-  canvas.onmouseup = () => {
-    state.drawing = false;
-  };
-
-  canvas.onmouseleave = () => {
-    state.drawing = false;
-  };
+  canvas.onmouseup = () => { state.drawing = false; };
+  canvas.onmouseleave = () => { state.drawing = false; };
 }
 
 function drawRemoteCanvas(payload) {
   if (!state.canvasContext) return;
-
   state.canvasContext.lineTo(payload.x, payload.y);
   state.canvasContext.stroke();
 }
@@ -1014,51 +891,16 @@ function setupGame() {
 
   document.onkeydown = (event) => {
     const key = event.key.toLowerCase();
-
-    if (
-      ![
-        "w",
-        "a",
-        "s",
-        "d",
-        "arrowup",
-        "arrowdown",
-        "arrowleft",
-        "arrowright"
-      ].includes(key)
-    ) {
+    if (!["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(key)) {
       return;
     }
 
     event.preventDefault();
 
-    if (key === "w" || key === "arrowup") {
-      state.gamePosition.y = Math.max(
-        0,
-        state.gamePosition.y - 3
-      );
-    }
-
-    if (key === "s" || key === "arrowdown") {
-      state.gamePosition.y = Math.min(
-        100,
-        state.gamePosition.y + 3
-      );
-    }
-
-    if (key === "a" || key === "arrowleft") {
-      state.gamePosition.x = Math.max(
-        0,
-        state.gamePosition.x - 3
-      );
-    }
-
-    if (key === "d" || key === "arrowright") {
-      state.gamePosition.x = Math.min(
-        100,
-        state.gamePosition.x + 3
-      );
-    }
+    if (key === "w" || key === "arrowup") state.gamePosition.y = Math.max(0, state.gamePosition.y - 3);
+    if (key === "s" || key === "arrowdown") state.gamePosition.y = Math.min(100, state.gamePosition.y + 3);
+    if (key === "a" || key === "arrowleft") state.gamePosition.x = Math.max(0, state.gamePosition.x - 3);
+    if (key === "d" || key === "arrowright") state.gamePosition.x = Math.min(100, state.gamePosition.x + 3);
 
     player.style.left = `${state.gamePosition.x}%`;
     player.style.top = `${state.gamePosition.y}%`;
@@ -1079,18 +921,28 @@ function setupGame() {
 }
 
 function updateRemoteGame(payload) {
-  const player = document.querySelector(
-    `[data-player="${payload.peerId}"]`
-  );
+  let player = document.querySelector(`[data-player="${payload.peerId}"]`);
 
-  if (!player) return;
+  if (!player && $("gameBoard")) {
+    player = document.createElement("div");
+    player.className = "remote-player";
+    player.dataset.player = payload.peerId;
+    player.style.position = "absolute";
+    player.style.width = "20px";
+    player.style.height = "20px";
+    player.style.backgroundColor = "#e74c3c";
+    player.style.borderRadius = "50%";
+    $("gameBoard").appendChild(player);
+  }
 
-  player.style.left = `${payload.x}%`;
-  player.style.top = `${payload.y}%`;
+  if (player) {
+    player.style.left = `${payload.x}%`;
+    player.style.top = `${payload.y}%`;
+  }
 }
 
 /* =========================
-   LEAVE / RESET
+   LEAVE & RESET
 ========================= */
 
 function cancelJoinRequest() {
@@ -1100,50 +952,32 @@ function cancelJoinRequest() {
       username: state.username
     });
   }
-
   resetToLobby();
 }
 
 function leaveRoom() {
   if (state.isHost) {
-    broadcast({
-      type: "REJECTED"
-    });
+    broadcast({ type: "REJECTED" });
   }
 
-  state.connections.forEach((connection) => {
-    connection.close();
-  });
-
-  state.calls.forEach((call) => {
-    call.close();
-  });
-
-  if (state.localStream) {
-    state.localStream.getTracks().forEach((track) => {
-      track.stop();
-    });
-  }
-
-  state.peer?.destroy();
-
-  resetState();
-  showScreen("lobby");
-  showToast("You left the room.");
+  state.connections.forEach((conn) => conn.close());
+  resetToLobby();
 }
 
 function resetToLobby() {
-  state.peer?.destroy();
-  resetState();
-  showScreen("lobby");
-}
+  if (state.localStream) {
+    state.localStream.getTracks().forEach((track) => track.stop());
+    state.localStream = null;
+  }
 
-function resetState() {
-  state.peer = null;
+  if (state.peer) {
+    state.peer.destroy();
+    state.peer = null;
+  }
+
   state.peerId = null;
   state.hostPeerId = null;
   state.roomCode = "";
-  state.username = "";
   state.isHost = false;
   state.connection = null;
   state.connections.clear();
@@ -1151,930 +985,38 @@ function resetState() {
   state.participants = [];
   state.messages = [];
   state.calls.clear();
-  state.localStream = null;
-  state.cameraEnabled = false;
-  state.micEnabled = false;
-  state.gamePosition = { x: 50, y: 50 };
 
-  if (localVideo) {
-    localVideo.srcObject = null;
-  }
+  if (messagesContainer) messagesContainer.innerHTML = "";
+  if (remoteVideos) remoteVideos.innerHTML = "";
 
-  if (remoteVideos) {
-    remoteVideos.innerHTML = "";
-  }
-
-  renderParticipants();
-  renderPendingRequests();
+  setStatus("");
+  showScreen("lobby");
 }
 
+/* =========================
+   INITIALIZATION
+========================= */
+
 function setupAllFeatures() {
-  setupTabs();
   setupChat();
+  setupTabs();
   setupMediaControls();
   setupCanvas();
   setupGame();
 }
 
-/* =========================
-   BUTTON EVENTS
-========================= */
+document.addEventListener("DOMContentLoaded", () => {
+  if (createRoomBtn) createRoomBtn.onclick = createRoom;
+  if (joinRoomBtn) joinRoomBtn.onclick = joinRoom;
+  if (cancelRequestBtn) cancelRequestBtn.onclick = cancelJoinRequest;
+  if (leaveRoomBtn) leaveRoomBtn.onclick = leaveRoom;
 
-createRoomBtn?.addEventListener("click", createRoom);
-joinRoomBtn?.addEventListener("click", joinRoom);
-cancelRequestBtn?.addEventListener("click", cancelJoinRequest);
-leaveRoomBtn?.addEventListener("click", leaveRoom);
-
-copyRoomBtn?.addEventListener("click", async () => {
-  try {
-    await navigator.clipboard.writeText(state.roomCode);
-
-    const copyStatus = $("copyStatus");
-    if (copyStatus) copyStatus.textContent = "Copied!";
-
-    showToast("Room code copied.", "success");
-
-    setTimeout(() => {
-      if (copyStatus) copyStatus.textContent = "";
-    }, 2000);
-  } catch {
-    showToast("Please copy the room code manually.");
+  if (copyRoomBtn) {
+    copyRoomBtn.onclick = () => {
+      if (!state.roomCode) return;
+      navigator.clipboard.writeText(state.roomCode).then(() => {
+        showToast("Room code copied!", "success");
+      });
+    };
   }
 });
-
-showScreen("lobby");
-
-/* =========================================================
-   MINGLE PARTY GAMES
-   Spyfall • Trivia Battle • Guess the Drawing
-   ========================================================= */
-
-(function installPartyGames() {
-  let partyPanel = null;
-
-  let partyState = {
-    game: null,
-    active: false,
-    round: 0,
-    questionIndex: 0,
-    scores: {},
-    answers: {},
-    drawingPlayer: null,
-    secretWord: "",
-    location: "",
-    spy: ""
-  };
-
-  const triviaQuestions = [
-    {
-      question: "Which planet is known as the Red Planet?",
-      options: ["Earth", "Mars", "Jupiter", "Venus"],
-      answer: "Mars"
-    },
-    {
-      question: "What is the capital of France?",
-      options: ["Madrid", "Paris", "Rome", "Berlin"],
-      answer: "Paris"
-    },
-    {
-      question: "Which animal is known as the King of the Jungle?",
-      options: ["Tiger", "Lion", "Elephant", "Leopard"],
-      answer: "Lion"
-    },
-    {
-      question: "How many continents are there?",
-      options: ["5", "6", "7", "8"],
-      answer: "7"
-    },
-    {
-      question: "Which language runs in a web browser?",
-      options: ["Python", "JavaScript", "C++", "Java"],
-      answer: "JavaScript"
-    }
-  ];
-
-  const spyLocations = [
-    "Beach",
-    "Airport",
-    "School",
-    "Hospital",
-    "Restaurant",
-    "Space Station",
-    "Wedding",
-    "Shopping Mall",
-    "Police Station",
-    "Movie Theatre"
-  ];
-
-  const drawingWords = [
-    "Rocket",
-    "Pizza",
-    "Dragon",
-    "Laptop",
-    "Guitar",
-    "Rainbow",
-    "Castle",
-    "Dinosaur",
-    "Coffee",
-    "Airplane"
-  ];
-
-  function getMyName() {
-    return state.username || $("currentUserName")?.textContent || "Player";
-  }
-
-  function isHostPlayer() {
-    return state.isHost === true;
-  }
-
-  function participantNames() {
-    const names = [];
-
-    if (Array.isArray(state.participants)) {
-      state.participants.forEach((person) => {
-        const name =
-          typeof person === "string"
-            ? person
-            : person.username || person.name;
-
-        if (name && !names.includes(name)) {
-          names.push(name);
-        }
-      });
-    }
-
-    if (!names.includes(getMyName())) {
-      names.push(getMyName());
-    }
-
-    return names;
-  }
-
-  function sendPartyMessage(payload) {
-    const message = {
-      type: "PARTY_GAME",
-      ...payload
-    };
-
-    if (isHostPlayer()) {
-      state.connections.forEach((connection) => {
-        if (connection.open) {
-          connection.send(message);
-        }
-      });
-    } else if (state.connection?.open) {
-      state.connection.send(message);
-    }
-  }
-
-  function broadcastPartyMessage(payload) {
-    if (!isHostPlayer()) return;
-
-    const message = {
-      type: "PARTY_GAME",
-      ...payload
-    };
-
-    state.connections.forEach((connection) => {
-      if (connection.open) {
-        connection.send(message);
-      }
-    });
-  }
-
-  function createPartyPanel() {
-    if (partyPanel || !$("gameBoard")) return;
-
-    partyPanel = document.createElement("div");
-    partyPanel.id = "partyGamesPanel";
-
-    partyPanel.innerHTML = `
-      <h3>🎮 Party Games</h3>
-
-      <p>
-        Play multiplayer games with everyone in this room.
-      </p>
-
-      <div id="partyGameButtons">
-        <button type="button" data-party-game="spyfall">
-          🕵️ Spyfall
-        </button>
-
-        <button type="button" data-party-game="trivia">
-          🧠 Trivia Battle
-        </button>
-
-        <button type="button" data-party-game="drawing">
-          🎨 Guess the Drawing
-        </button>
-      </div>
-
-      <div id="partyGameContent">
-        <p>Choose a game to begin.</p>
-      </div>
-    `;
-
-    const gameBoard = $("gameBoard");
-
-    if (!gameBoard || !gameBoard.parentElement) {
-      partyPanel = null;
-      return;
-    }
-
-    gameBoard.parentElement.insertBefore(
-      partyPanel,
-      gameBoard
-    );
-
-    partyPanel
-      .querySelectorAll("[data-party-game]")
-      .forEach((button) => {
-        button.onclick = () => {
-          if (!isHostPlayer()) {
-            showPartyNotice(
-              "Only the room host can start a game."
-            );
-            return;
-          }
-
-          const selectedGame = button.dataset.partyGame;
-
-          if (selectedGame === "spyfall") {
-            startSpyfall();
-          }
-
-          if (selectedGame === "trivia") {
-            startTrivia();
-          }
-
-          if (selectedGame === "drawing") {
-            startDrawingGame();
-          }
-        };
-      });
-  }
-
-  function partyContent(html) {
-    const content = $("partyGameContent");
-
-    if (content) {
-      content.innerHTML = html;
-    }
-  }
-
-  function showPartyNotice(message) {
-    partyContent(`
-      <div class="party-notice">
-        ${escapeHtml(message)}
-      </div>
-    `);
-  }
-
-  /* =========================
-     SPYFALL
-  ========================= */
-
-  function startSpyfall() {
-    if (!isHostPlayer()) return;
-
-    const players = participantNames();
-
-    if (players.length < 3) {
-      showPartyNotice("Spyfall needs at least 3 players.");
-      return;
-    }
-
-    const location =
-      spyLocations[
-        Math.floor(Math.random() * spyLocations.length)
-      ];
-
-    const spy =
-      players[Math.floor(Math.random() * players.length)];
-
-    partyState = {
-      game: "spyfall",
-      active: true,
-      round: 1,
-      questionIndex: 0,
-      scores: {},
-      answers: {},
-      drawingPlayer: null,
-      secretWord: "",
-      location,
-      spy
-    };
-
-    broadcastPartyMessage({
-      action: "SPYFALL_START",
-      players,
-      location,
-      spy
-    });
-
-    renderSpyfall({
-      players,
-      location,
-      spy
-    });
-  }
-
-  function renderSpyfall(data) {
-    const me = getMyName();
-    const isSpy = me === data.spy;
-
-    partyContent(`
-      <h4>🕵️ Spyfall — Round ${partyState.round}</h4>
-
-      <div class="party-role-card ${
-        isSpy ? "spy-card" : ""
-      }">
-        <strong>Your role:</strong>
-
-        <div class="party-role">
-          ${
-            isSpy
-              ? "🕵️ YOU ARE THE SPY"
-              : "👥 INNOCENT"
-          }
-        </div>
-
-        ${
-          isSpy
-            ? `
-              <p>
-                Try to figure out the secret location
-                without being caught.
-              </p>
-            `
-            : `
-              <p>
-                Secret location:
-                <strong>${escapeHtml(data.location)}</strong>
-              </p>
-            `
-        }
-      </div>
-
-      <p>
-        Ask suspicious questions and identify the spy.
-      </p>
-
-      ${
-        isHostPlayer()
-          ? `
-            <button type="button" id="endSpyfallBtn">
-              Reveal Spy
-            </button>
-          `
-          : ""
-      }
-    `);
-
-    $("endSpyfallBtn")?.addEventListener("click", () => {
-      broadcastPartyMessage({
-        action: "SPYFALL_END",
-        spy: data.spy,
-        location: data.location
-      });
-
-      renderSpyfallEnd(data);
-    });
-  }
-
-  function renderSpyfallEnd(data) {
-    partyState.active = false;
-
-    partyContent(`
-      <h4>🕵️ Spyfall Results</h4>
-
-      <p>
-        The spy was:
-        <strong>${escapeHtml(data.spy)}</strong>
-      </p>
-
-      <p>
-        The location was:
-        <strong>${escapeHtml(data.location)}</strong>
-      </p>
-
-      ${
-        isHostPlayer()
-          ? `
-            <button type="button" id="restartSpyfallBtn">
-              Play Again
-            </button>
-          `
-          : ""
-      }
-    `);
-
-    $("restartSpyfallBtn")?.addEventListener(
-      "click",
-      startSpyfall
-    );
-  }
-
-  /* =========================
-     TRIVIA
-  ========================= */
-
-  function startTrivia() {
-    if (!isHostPlayer()) return;
-
-    partyState = {
-      game: "trivia",
-      active: true,
-      round: 1,
-      questionIndex: 0,
-      scores: {},
-      answers: {},
-      drawingPlayer: null,
-      secretWord: "",
-      location: "",
-      spy: ""
-    };
-
-    participantNames().forEach((name) => {
-      partyState.scores[name] = 0;
-    });
-
-    broadcastPartyMessage({
-      action: "TRIVIA_START",
-      questionIndex: 0,
-      scores: partyState.scores
-    });
-
-    renderTriviaQuestion(0);
-  }
-
-  function renderTriviaQuestion(index) {
-    const question = triviaQuestions[index];
-
-    if (!question) {
-      finishTrivia();
-      return;
-    }
-
-    partyState.questionIndex = index;
-    partyState.answers = {};
-
-    partyContent(`
-      <h4>
-        🧠 Trivia Battle —
-        Question ${index + 1}/${triviaQuestions.length}
-      </h4>
-
-      <p class="trivia-question">
-        ${escapeHtml(question.question)}
-      </p>
-
-      <div id="triviaOptions">
-        ${question.options
-          .map(
-            (option) => `
-              <button
-                type="button"
-                data-trivia-answer="${escapeHtml(option)}"
-              >
-                ${escapeHtml(option)}
-              </button>
-            `
-          )
-          .join("")}
-      </div>
-
-      <p id="triviaStatus">
-        Choose one answer.
-      </p>
-    `);
-
-    partyPanel
-      ?.querySelectorAll("[data-trivia-answer]")
-      .forEach((button) => {
-        button.onclick = () => {
-          const answer = button.dataset.triviaAnswer;
-
-          partyPanel
-            ?.querySelectorAll("[data-trivia-answer]")
-            .forEach((item) => {
-              item.disabled = true;
-            });
-
-          const status = $("triviaStatus");
-
-          if (status) {
-            status.textContent = "Answer submitted.";
-          }
-
-          if (isHostPlayer()) {
-            receiveTriviaAnswer(getMyName(), answer);
-          } else {
-            sendPartyMessage({
-              action: "TRIVIA_ANSWER",
-              player: getMyName(),
-              answer
-            });
-          }
-        };
-      });
-  }
-
-  function receiveTriviaAnswer(player, answer) {
-    if (!isHostPlayer()) return;
-
-    if (
-      Object.prototype.hasOwnProperty.call(
-        partyState.answers,
-        player
-      )
-    ) {
-      return;
-    }
-
-    partyState.answers[player] = answer;
-
-    const currentQuestion =
-      triviaQuestions[partyState.questionIndex];
-
-    if (answer === currentQuestion.answer) {
-      partyState.scores[player] =
-        (partyState.scores[player] || 0) + 1;
-    }
-
-    broadcastPartyMessage({
-      action: "TRIVIA_SCORE_UPDATE",
-      scores: partyState.scores,
-      answeredBy: player
-    });
-
-    const totalPlayers = participantNames().length;
-
-    if (
-      Object.keys(partyState.answers).length >= totalPlayers
-    ) {
-      setTimeout(nextTriviaQuestion, 800);
-    }
-  }
-
-  function nextTriviaQuestion() {
-    if (!isHostPlayer()) return;
-
-    partyState.questionIndex += 1;
-
-    if (
-      partyState.questionIndex >= triviaQuestions.length
-    ) {
-      finishTrivia();
-      return;
-    }
-
-    broadcastPartyMessage({
-      action: "TRIVIA_NEXT",
-      questionIndex: partyState.questionIndex,
-      scores: partyState.scores
-    });
-
-    renderTriviaQuestion(partyState.questionIndex);
-  }
-
-  function finishTrivia() {
-    partyState.active = false;
-
-    const sortedScores = Object.entries(partyState.scores)
-      .sort((a, b) => b[1] - a[1])
-      .map(
-        ([name, score]) => `
-          <li>
-            <strong>${escapeHtml(name)}</strong>:
-            ${score} point(s)
-          </li>
-        `
-      )
-      .join("");
-
-    partyContent(`
-      <h4>🏆 Trivia Battle Results</h4>
-
-      <ol>
-        ${sortedScores || "<li>No scores yet.</li>"}
-      </ol>
-
-      ${
-        isHostPlayer()
-          ? `
-            <button type="button" id="restartTriviaBtn">
-              Play Again
-            </button>
-          `
-          : ""
-      }
-    `);
-
-    if (isHostPlayer()) {
-      broadcastPartyMessage({
-        action: "TRIVIA_END",
-        scores: partyState.scores
-      });
-    }
-
-    $("restartTriviaBtn")?.addEventListener(
-      "click",
-      startTrivia
-    );
-  }
-
-  /* =========================
-     GUESS THE DRAWING
-  ========================= */
-
-  function startDrawingGame() {
-    if (!isHostPlayer()) return;
-
-    const players = participantNames();
-
-    if (players.length < 2) {
-      showPartyNotice(
-        "Guess the Drawing needs at least 2 players."
-      );
-      return;
-    }
-
-    const drawingPlayer =
-      players[Math.floor(Math.random() * players.length)];
-
-    const secretWord =
-      drawingWords[
-        Math.floor(Math.random() * drawingWords.length)
-      ];
-
-    partyState = {
-      game: "drawing",
-      active: true,
-      round: 1,
-      questionIndex: 0,
-      scores: {},
-      answers: {},
-      drawingPlayer,
-      secretWord,
-      location: "",
-      spy: ""
-    };
-
-    broadcastPartyMessage({
-      action: "DRAWING_START",
-      drawingPlayer,
-      secretWord
-    });
-
-    renderDrawingGame(drawingPlayer, secretWord);
-  }
-
-  function renderDrawingGame(
-    drawingPlayer,
-    secretWord
-  ) {
-    const isDrawer = getMyName() === drawingPlayer;
-
-    partyContent(`
-      <h4>🎨 Guess the Drawing</h4>
-
-      <p>
-        Drawing player:
-        <strong>${escapeHtml(drawingPlayer)}</strong>
-      </p>
-
-      ${
-        isDrawer
-          ? `
-            <div class="party-role-card spy-card">
-              <p>Your word is:</p>
-
-              <strong class="drawing-word">
-                ${escapeHtml(secretWord)}
-              </strong>
-
-              <p>
-                Use the shared canvas above to draw it.
-              </p>
-            </div>
-          `
-          : `
-            <div class="party-role-card">
-              Watch the shared canvas and type guesses
-              in chat.
-            </div>
-          `
-      }
-
-      ${
-        isHostPlayer()
-          ? `
-            <button type="button" id="endDrawingBtn">
-              Reveal Word
-            </button>
-          `
-          : ""
-      }
-    `);
-
-    $("endDrawingBtn")?.addEventListener("click", () => {
-      broadcastPartyMessage({
-        action: "DRAWING_END",
-        secretWord
-      });
-
-      renderDrawingResults(secretWord);
-    });
-  }
-
-  function renderDrawingResults(secretWord) {
-    partyState.active = false;
-
-    partyContent(`
-      <h4>🎨 Drawing Results</h4>
-
-      <p>
-        The word was:
-        <strong>${escapeHtml(secretWord)}</strong>
-      </p>
-
-      ${
-        isHostPlayer()
-          ? `
-            <button type="button" id="restartDrawingBtn">
-              Play Again
-            </button>
-          `
-          : ""
-      }
-    `);
-
-    $("restartDrawingBtn")?.addEventListener(
-      "click",
-      startDrawingGame
-    );
-  }
-
-  /* =========================
-     RECEIVE PARTY MESSAGES
-  ========================= */
-
-  function handlePartyMessage(payload) {
-    if (!payload || payload.type !== "PARTY_GAME") {
-      return;
-    }
-
-    if (payload.action === "SPYFALL_START") {
-      partyState = {
-        game: "spyfall",
-        active: true,
-        round: 1,
-        questionIndex: 0,
-        scores: {},
-        answers: {},
-        drawingPlayer: null,
-        secretWord: "",
-        location: payload.location,
-        spy: payload.spy
-      };
-
-      renderSpyfall(payload);
-      return;
-    }
-
-    if (payload.action === "SPYFALL_END") {
-      renderSpyfallEnd(payload);
-      return;
-    }
-
-    if (payload.action === "TRIVIA_START") {
-      partyState = {
-        game: "trivia",
-        active: true,
-        round: 1,
-        questionIndex: payload.questionIndex || 0,
-        scores: payload.scores || {},
-        answers: {},
-        drawingPlayer: null,
-        secretWord: "",
-        location: "",
-        spy: ""
-      };
-
-      renderTriviaQuestion(payload.questionIndex || 0);
-      return;
-    }
-
-    if (payload.action === "TRIVIA_ANSWER") {
-      if (isHostPlayer()) {
-        receiveTriviaAnswer(
-          payload.player,
-          payload.answer
-        );
-      }
-
-      return;
-    }
-
-    if (payload.action === "TRIVIA_SCORE_UPDATE") {
-      partyState.scores =
-        payload.scores || partyState.scores;
-      return;
-    }
-
-    if (payload.action === "TRIVIA_NEXT") {
-      partyState.questionIndex = payload.questionIndex;
-      partyState.scores =
-        payload.scores || partyState.scores;
-
-      renderTriviaQuestion(payload.questionIndex);
-      return;
-    }
-
-    if (payload.action === "TRIVIA_END") {
-      partyState.scores = payload.scores || {};
-      partyState.active = false;
-
-      const sortedScores = Object.entries(
-        partyState.scores
-      )
-        .sort((a, b) => b[1] - a[1])
-        .map(
-          ([name, score]) => `
-            <li>
-              <strong>${escapeHtml(name)}</strong>:
-              ${score} point(s)
-            </li>
-          `
-        )
-        .join("");
-
-      partyContent(`
-        <h4>🏆 Trivia Battle Results</h4>
-
-        <ol>
-          ${sortedScores || "<li>No scores yet.</li>"}
-        </ol>
-      `);
-
-      return;
-    }
-
-    if (payload.action === "DRAWING_START") {
-      partyState = {
-        game: "drawing",
-        active: true,
-        round: 1,
-        questionIndex: 0,
-        scores: {},
-        answers: {},
-        drawingPlayer: payload.drawingPlayer,
-        secretWord: payload.secretWord,
-        location: "",
-        spy: ""
-      };
-
-      renderDrawingGame(
-        payload.drawingPlayer,
-        payload.secretWord
-      );
-
-      return;
-    }
-
-    if (payload.action === "DRAWING_END") {
-      renderDrawingResults(payload.secretWord);
-    }
-  }
-
-  const originalHandlePayload = handlePayload;
-
-  handlePayload = function (payload, connection) {
-    originalHandlePayload(payload, connection);
-    handlePartyMessage(payload);
-  };
-
-  const originalSetupAllFeatures = setupAllFeatures;
-
-  setupAllFeatures = function () {
-    originalSetupAllFeatures();
-    setupPartyGames();
-  };
-
-  function setupPartyGames() {
-    const oldPanel =
-      document.getElementById("partyGamesPanel");
-
-    if (oldPanel) {
-      oldPanel.remove();
-    }
-
-    partyPanel = null;
-    createPartyPanel();
-  }
-
-  if ($("gameBoard")) {
-    setupPartyGames();
-  }
-})();
