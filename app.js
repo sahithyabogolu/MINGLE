@@ -1090,3 +1090,924 @@ copyRoomBtn?.addEventListener("click", async () => {
 });
 
 showScreen("lobby");
+
+/* =========================================================
+   MINGLE PARTY GAMES
+   Spyfall • Trivia Battle • Guess the Drawing
+   ========================================================= */
+
+(function installPartyGames() {
+  let partyPanel = null;
+
+  let partyState = {
+    game: null,
+    active: false,
+    round: 0,
+    questionIndex: 0,
+    scores: {},
+    answers: {},
+    drawingPlayer: null,
+    secretWord: "",
+    location: "",
+    spy: ""
+  };
+
+  const triviaQuestions = [
+    {
+      question: "Which planet is known as the Red Planet?",
+      options: ["Earth", "Mars", "Jupiter", "Venus"],
+      answer: "Mars"
+    },
+    {
+      question: "What is the capital of France?",
+      options: ["Madrid", "Paris", "Rome", "Berlin"],
+      answer: "Paris"
+    },
+    {
+      question: "Which animal is known as the King of the Jungle?",
+      options: ["Tiger", "Lion", "Elephant", "Leopard"],
+      answer: "Lion"
+    },
+    {
+      question: "How many continents are there?",
+      options: ["5", "6", "7", "8"],
+      answer: "7"
+    },
+    {
+      question: "Which language runs in a web browser?",
+      options: ["Python", "JavaScript", "C++", "Java"],
+      answer: "JavaScript"
+    }
+  ];
+
+  const spyLocations = [
+    "Beach",
+    "Airport",
+    "School",
+    "Hospital",
+    "Restaurant",
+    "Space Station",
+    "Wedding",
+    "Shopping Mall",
+    "Police Station",
+    "Movie Theatre"
+  ];
+
+  const drawingWords = [
+    "Rocket",
+    "Pizza",
+    "Dragon",
+    "Laptop",
+    "Guitar",
+    "Rainbow",
+    "Castle",
+    "Dinosaur",
+    "Coffee",
+    "Airplane"
+  ];
+
+  function getMyName() {
+    return state.username || $("currentUserName")?.textContent || "Player";
+  }
+
+  function isHostPlayer() {
+    return state.isHost === true;
+  }
+
+  function participantNames() {
+    const names = [];
+
+    if (Array.isArray(state.participants)) {
+      state.participants.forEach((person) => {
+        const name =
+          typeof person === "string"
+            ? person
+            : person.username || person.name;
+
+        if (name && !names.includes(name)) {
+          names.push(name);
+        }
+      });
+    }
+
+    if (!names.includes(getMyName())) {
+      names.push(getMyName());
+    }
+
+    return names;
+  }
+
+  function sendPartyMessage(payload) {
+    const message = {
+      type: "PARTY_GAME",
+      ...payload
+    };
+
+    if (isHostPlayer()) {
+      state.connections.forEach((connection) => {
+        if (connection.open) {
+          connection.send(message);
+        }
+      });
+    } else if (state.connection?.open) {
+      state.connection.send(message);
+    }
+  }
+
+  function broadcastPartyMessage(payload) {
+    if (!isHostPlayer()) return;
+
+    const message = {
+      type: "PARTY_GAME",
+      ...payload
+    };
+
+    state.connections.forEach((connection) => {
+      if (connection.open) {
+        connection.send(message);
+      }
+    });
+  }
+
+  function createPartyPanel() {
+    if (partyPanel || !$("gameBoard")) return;
+
+    partyPanel = document.createElement("div");
+    partyPanel.id = "partyGamesPanel";
+
+    partyPanel.style.cssText = `
+      margin: 18px 0;
+      padding: 18px;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 14px;
+      background: rgba(0,0,0,.18);
+    `;
+
+    partyPanel.innerHTML = `
+      <h3 style="margin-top:0;">🎮 Party Games</h3>
+
+      <p style="opacity:.75;font-size:13px;">
+        Play multiplayer games with everyone in this room.
+      </p>
+
+      <div id="partyGameButtons" style="
+        display:flex;
+        flex-wrap:wrap;
+        gap:8px;
+        margin-bottom:14px;
+      ">
+        <button type="button" data-party-game="spyfall">
+          🕵️ Spyfall
+        </button>
+
+        <button type="button" data-party-game="trivia">
+          🧠 Trivia Battle
+        </button>
+
+        <button type="button" data-party-game="drawing">
+          🎨 Guess the Drawing
+        </button>
+      </div>
+
+      <div id="partyGameContent">
+        <p style="opacity:.7;">Choose a game to begin.</p>
+      </div>
+    `;
+
+    const gameBoard = $("gameBoard");
+
+    if (!gameBoard || !gameBoard.parentElement) {
+      partyPanel = null;
+      return;
+    }
+
+    gameBoard.parentElement.insertBefore(partyPanel, gameBoard);
+
+    partyPanel
+      .querySelectorAll("[data-party-game]")
+      .forEach((button) => {
+        button.addEventListener("click", () => {
+          if (!isHostPlayer()) {
+            showPartyNotice("Only the room host can start a game.");
+            return;
+          }
+
+          const selectedGame = button.dataset.partyGame;
+
+          if (selectedGame === "spyfall") {
+            startSpyfall();
+          }
+
+          if (selectedGame === "trivia") {
+            startTrivia();
+          }
+
+          if (selectedGame === "drawing") {
+            startDrawingGame();
+          }
+        });
+      });
+  }
+
+  function partyContent(html) {
+    const content = $("partyGameContent");
+
+    if (content) {
+      content.innerHTML = html;
+    }
+  }
+
+  function showPartyNotice(message) {
+    partyContent(`
+      <div style="
+        padding:12px;
+        border-radius:10px;
+        background:rgba(255,255,255,.06);
+      ">
+        ${escapeHtml(message)}
+      </div>
+    `);
+  }
+
+  /* =========================
+     SPYFALL
+  ========================= */
+
+  function startSpyfall() {
+    if (!isHostPlayer()) {
+      showPartyNotice("Only the room host can start Spyfall.");
+      return;
+    }
+
+    const players = participantNames();
+
+    if (players.length < 3) {
+      showPartyNotice("Spyfall needs at least 3 players.");
+      return;
+    }
+
+    const location =
+      spyLocations[Math.floor(Math.random() * spyLocations.length)];
+
+    const spy =
+      players[Math.floor(Math.random() * players.length)];
+
+    partyState = {
+      game: "spyfall",
+      active: true,
+      round: 1,
+      questionIndex: 0,
+      scores: {},
+      answers: {},
+      drawingPlayer: null,
+      secretWord: "",
+      location,
+      spy
+    };
+
+    broadcastPartyMessage({
+      action: "SPYFALL_START",
+      players,
+      location,
+      spy
+    });
+
+    renderSpyfall({
+      players,
+      location,
+      spy
+    });
+  }
+
+  function renderSpyfall(data) {
+    const me = getMyName();
+    const isSpy = me === data.spy;
+
+    partyContent(`
+      <h4>🕵️ Spyfall — Round ${partyState.round}</h4>
+
+      <div style="
+        padding:16px;
+        border-radius:12px;
+        margin:12px 0;
+        background:${
+          isSpy
+            ? "rgba(150,30,55,.25)"
+            : "rgba(255,255,255,.06)"
+        };
+      ">
+        <strong>Your role:</strong>
+
+        <div style="font-size:22px;margin-top:8px;">
+          ${
+            isSpy
+              ? "🕵️ YOU ARE THE SPY"
+              : "👥 INNOCENT"
+          }
+        </div>
+
+        ${
+          isSpy
+            ? `
+              <p>
+                Try to figure out the secret location
+                without being caught.
+              </p>
+            `
+            : `
+              <p>
+                Secret location:
+                <strong>${escapeHtml(data.location)}</strong>
+              </p>
+            `
+        }
+      </div>
+
+      <p>
+        Ask suspicious questions and try to identify the spy.
+      </p>
+
+      ${
+        isHostPlayer()
+          ? `
+            <button type="button" id="endSpyfallBtn">
+              Reveal Spy
+            </button>
+          `
+          : ""
+      }
+    `);
+
+    $("endSpyfallBtn")?.addEventListener("click", () => {
+      broadcastPartyMessage({
+        action: "SPYFALL_END",
+        spy: data.spy,
+        location: data.location
+      });
+
+      renderSpyfallEnd(data);
+    });
+  }
+
+  function renderSpyfallEnd(data) {
+    partyState.active = false;
+
+    partyContent(`
+      <h4>🕵️ Spyfall Results</h4>
+
+      <p>
+        The spy was:
+        <strong>${escapeHtml(data.spy)}</strong>
+      </p>
+
+      <p>
+        The location was:
+        <strong>${escapeHtml(data.location)}</strong>
+      </p>
+
+      ${
+        isHostPlayer()
+          ? `
+            <button type="button" id="restartSpyfallBtn">
+              Play Again
+            </button>
+          `
+          : ""
+      }
+    `);
+
+    $("restartSpyfallBtn")?.addEventListener(
+      "click",
+      startSpyfall
+    );
+  }
+
+  /* =========================
+     TRIVIA
+  ========================= */
+
+  function startTrivia() {
+    if (!isHostPlayer()) {
+      showPartyNotice("Only the room host can start Trivia.");
+      return;
+    }
+
+    partyState = {
+      game: "trivia",
+      active: true,
+      round: 1,
+      questionIndex: 0,
+      scores: {},
+      answers: {},
+      drawingPlayer: null,
+      secretWord: "",
+      location: "",
+      spy: ""
+    };
+
+    participantNames().forEach((name) => {
+      partyState.scores[name] = 0;
+    });
+
+    broadcastPartyMessage({
+      action: "TRIVIA_START",
+      questionIndex: 0,
+      scores: partyState.scores
+    });
+
+    renderTriviaQuestion(0);
+  }
+
+  function renderTriviaQuestion(index) {
+    const question = triviaQuestions[index];
+
+    if (!question) {
+      finishTrivia();
+      return;
+    }
+
+    partyState.answers = {};
+
+    partyContent(`
+      <h4>
+        🧠 Trivia Battle —
+        Question ${index + 1}/${triviaQuestions.length}
+      </h4>
+
+      <p style="font-size:18px;font-weight:600;">
+        ${escapeHtml(question.question)}
+      </p>
+
+      <div id="triviaOptions" style="
+        display:flex;
+        flex-direction:column;
+        gap:8px;
+      ">
+        ${question.options
+          .map(
+            (option) => `
+              <button
+                type="button"
+                data-trivia-answer="${escapeHtml(option)}"
+              >
+                ${escapeHtml(option)}
+              </button>
+            `
+          )
+          .join("")}
+      </div>
+
+      <p id="triviaStatus" style="opacity:.7;">
+        Choose one answer.
+      </p>
+    `);
+
+    partyPanel
+      ?.querySelectorAll("[data-trivia-answer]")
+      .forEach((button) => {
+        button.addEventListener("click", () => {
+          const answer = button.dataset.triviaAnswer;
+
+          partyPanel
+            ?.querySelectorAll("[data-trivia-answer]")
+            .forEach((item) => {
+              item.disabled = true;
+            });
+
+          const status = $("triviaStatus");
+
+          if (status) {
+            status.textContent = "Answer submitted.";
+          }
+
+          if (isHostPlayer()) {
+            receiveTriviaAnswer(getMyName(), answer);
+          } else {
+            sendPartyMessage({
+              action: "TRIVIA_ANSWER",
+              player: getMyName(),
+              answer
+            });
+          }
+        });
+      });
+  }
+
+  function receiveTriviaAnswer(player, answer) {
+    if (!isHostPlayer()) return;
+
+    if (
+      Object.prototype.hasOwnProperty.call(
+        partyState.answers,
+        player
+      )
+    ) {
+      return;
+    }
+
+    partyState.answers[player] = answer;
+
+    const currentQuestion =
+      triviaQuestions[partyState.questionIndex];
+
+    if (answer === currentQuestion.answer) {
+      partyState.scores[player] =
+        (partyState.scores[player] || 0) + 1;
+    }
+
+    broadcastPartyMessage({
+      action: "TRIVIA_SCORE_UPDATE",
+      scores: partyState.scores,
+      answeredBy: player
+    });
+
+    const totalPlayers = participantNames().length;
+
+    if (
+      Object.keys(partyState.answers).length >= totalPlayers
+    ) {
+      setTimeout(() => {
+        nextTriviaQuestion();
+      }, 800);
+    }
+  }
+
+  function nextTriviaQuestion() {
+    if (!isHostPlayer()) return;
+
+    partyState.questionIndex += 1;
+
+    if (
+      partyState.questionIndex >= triviaQuestions.length
+    ) {
+      finishTrivia();
+      return;
+    }
+
+    broadcastPartyMessage({
+      action: "TRIVIA_NEXT",
+      questionIndex: partyState.questionIndex,
+      scores: partyState.scores
+    });
+
+    renderTriviaQuestion(partyState.questionIndex);
+  }
+
+  function finishTrivia() {
+    partyState.active = false;
+
+    const sortedScores = Object.entries(partyState.scores)
+      .sort((a, b) => b[1] - a[1])
+      .map(
+        ([name, score]) => `
+          <li>
+            <strong>${escapeHtml(name)}</strong>:
+            ${score} point(s)
+          </li>
+        `
+      )
+      .join("");
+
+    partyContent(`
+      <h4>🏆 Trivia Battle Results</h4>
+
+      <ol>
+        ${sortedScores || "<li>No scores yet.</li>"}
+      </ol>
+
+      ${
+        isHostPlayer()
+          ? `
+            <button type="button" id="restartTriviaBtn">
+              Play Again
+            </button>
+          `
+          : ""
+      }
+    `);
+
+    if (isHostPlayer()) {
+      broadcastPartyMessage({
+        action: "TRIVIA_END",
+        scores: partyState.scores
+      });
+    }
+
+    $("restartTriviaBtn")?.addEventListener(
+      "click",
+      startTrivia
+    );
+  }
+
+  /* =========================
+     GUESS THE DRAWING
+  ========================= */
+
+  function startDrawingGame() {
+    if (!isHostPlayer()) {
+      showPartyNotice(
+        "Only the room host can start Guess the Drawing."
+      );
+      return;
+    }
+
+    const players = participantNames();
+
+    if (players.length < 2) {
+      showPartyNotice(
+        "Guess the Drawing needs at least 2 players."
+      );
+      return;
+    }
+
+    const drawingPlayer =
+      players[Math.floor(Math.random() * players.length)];
+
+    const secretWord =
+      drawingWords[
+        Math.floor(Math.random() * drawingWords.length)
+      ];
+
+    partyState = {
+      game: "drawing",
+      active: true,
+      round: 1,
+      questionIndex: 0,
+      scores: {},
+      answers: {},
+      drawingPlayer,
+      secretWord,
+      location: "",
+      spy: ""
+    };
+
+    broadcastPartyMessage({
+      action: "DRAWING_START",
+      drawingPlayer,
+      secretWord
+    });
+
+    renderDrawingGame(drawingPlayer, secretWord);
+  }
+
+  function renderDrawingGame(
+    drawingPlayer,
+    secretWord
+  ) {
+    const isDrawer = getMyName() === drawingPlayer;
+
+    partyContent(`
+      <h4>🎨 Guess the Drawing</h4>
+
+      <p>
+        Drawing player:
+        <strong>${escapeHtml(drawingPlayer)}</strong>
+      </p>
+
+      ${
+        isDrawer
+          ? `
+            <div style="
+              padding:12px;
+              border-radius:10px;
+              background:rgba(150,30,55,.25);
+            ">
+              Your word is:
+
+              <strong style="font-size:20px;">
+                ${escapeHtml(secretWord)}
+              </strong>
+
+              <p>
+                Use the shared canvas above to draw it.
+              </p>
+            </div>
+          `
+          : `
+            <div style="
+              padding:12px;
+              border-radius:10px;
+              background:rgba(255,255,255,.06);
+            ">
+              Watch the shared canvas and type your guesses
+              in chat.
+            </div>
+          `
+      }
+
+      ${
+        isHostPlayer()
+          ? `
+            <button type="button" id="endDrawingBtn">
+              Reveal Word
+            </button>
+          `
+          : ""
+      }
+    `);
+
+    $("endDrawingBtn")?.addEventListener("click", () => {
+      broadcastPartyMessage({
+        action: "DRAWING_END",
+        secretWord
+      });
+
+      renderDrawingResults(secretWord);
+    });
+  }
+
+  function renderDrawingResults(secretWord) {
+    partyState.active = false;
+
+    partyContent(`
+      <h4>🎨 Drawing Results</h4>
+
+      <p>
+        The word was:
+        <strong>${escapeHtml(secretWord)}</strong>
+      </p>
+
+      ${
+        isHostPlayer()
+          ? `
+            <button type="button" id="restartDrawingBtn">
+              Play Again
+            </button>
+          `
+          : ""
+      }
+    `);
+
+    $("restartDrawingBtn")?.addEventListener(
+      "click",
+      startDrawingGame
+    );
+  }
+
+  /* =========================
+     RECEIVE PARTY MESSAGES
+  ========================= */
+
+  function handlePartyMessage(payload) {
+    if (!payload || payload.type !== "PARTY_GAME") {
+      return;
+    }
+
+    if (payload.action === "SPYFALL_START") {
+      partyState = {
+        game: "spyfall",
+        active: true,
+        round: 1,
+        questionIndex: 0,
+        scores: {},
+        answers: {},
+        drawingPlayer: null,
+        secretWord: "",
+        location: payload.location,
+        spy: payload.spy
+      };
+
+      renderSpyfall(payload);
+      return;
+    }
+
+    if (payload.action === "SPYFALL_END") {
+      renderSpyfallEnd(payload);
+      return;
+    }
+
+    if (payload.action === "TRIVIA_START") {
+      partyState = {
+        game: "trivia",
+        active: true,
+        round: 1,
+        questionIndex: payload.questionIndex || 0,
+        scores: payload.scores || {},
+        answers: {},
+        drawingPlayer: null,
+        secretWord: "",
+        location: "",
+        spy: ""
+      };
+
+      renderTriviaQuestion(payload.questionIndex || 0);
+      return;
+    }
+
+    if (payload.action === "TRIVIA_ANSWER") {
+      if (isHostPlayer()) {
+        receiveTriviaAnswer(
+          payload.player,
+          payload.answer
+        );
+      }
+
+      return;
+    }
+
+    if (payload.action === "TRIVIA_SCORE_UPDATE") {
+      partyState.scores =
+        payload.scores || partyState.scores;
+
+      return;
+    }
+
+    if (payload.action === "TRIVIA_NEXT") {
+      partyState.questionIndex = payload.questionIndex;
+      partyState.scores =
+        payload.scores || partyState.scores;
+
+      renderTriviaQuestion(payload.questionIndex);
+      return;
+    }
+
+    if (payload.action === "TRIVIA_END") {
+      partyState.scores = payload.scores || {};
+      partyState.active = false;
+
+      const sortedScores = Object.entries(
+        partyState.scores
+      )
+        .sort((a, b) => b[1] - a[1])
+        .map(
+          ([name, score]) => `
+            <li>
+              <strong>${escapeHtml(name)}</strong>:
+              ${score} point(s)
+            </li>
+          `
+        )
+        .join("");
+
+      partyContent(`
+        <h4>🏆 Trivia Battle Results</h4>
+
+        <ol>
+          ${sortedScores || "<li>No scores yet.</li>"}
+        </ol>
+      `);
+
+      return;
+    }
+
+    if (payload.action === "DRAWING_START") {
+      partyState = {
+        game: "drawing",
+        active: true,
+        round: 1,
+        questionIndex: 0,
+        scores: {},
+        answers: {},
+        drawingPlayer: payload.drawingPlayer,
+        secretWord: payload.secretWord,
+        location: "",
+        spy: ""
+      };
+
+      renderDrawingGame(
+        payload.drawingPlayer,
+        payload.secretWord
+      );
+
+      return;
+    }
+
+    if (payload.action === "DRAWING_END") {
+      renderDrawingResults(payload.secretWord);
+    }
+  }
+
+  /* =========================
+     CONNECT PARTY GAMES
+  ========================= */
+
+  const originalHandlePayload = handlePayload;
+
+  handlePayload = function (payload, connection) {
+    originalHandlePayload(payload, connection);
+    handlePartyMessage(payload);
+  };
+
+  const originalSetupAllFeatures = setupAllFeatures;
+
+  setupAllFeatures = function () {
+    originalSetupAllFeatures();
+    setupPartyGames();
+  };
+
+  function setupPartyGames() {
+    const oldPanel =
+      document.getElementById("partyGamesPanel");
+
+    if (oldPanel) {
+      oldPanel.remove();
+    }
+
+    partyPanel = null;
+    createPartyPanel();
+  }
+
+  if ($("gameBoard")) {
+    setupPartyGames();
+  }
+})();
