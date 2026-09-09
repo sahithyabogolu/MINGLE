@@ -1,27 +1,17 @@
-/* =========================================================
-   MINGLE - Complete Application Script
-   GitHub Pages + PeerJS + Chat + Video + Join Approval
-   ========================================================= */
-
 "use strict";
-
-/* =========================================================
-   STATE
-========================================================= */
 
 const state = {
   peer: null,
   peerId: null,
   hostPeerId: null,
-
   roomCode: "",
   username: "",
   isHost: false,
 
-  connection: null,
+  hostConnection: null,
   connections: new Map(),
   pendingRequests: new Map(),
-  participants: [],
+  participants: new Map(),
   messages: [],
   calls: new Map(),
 
@@ -29,52 +19,37 @@ const state = {
   cameraEnabled: false,
   micEnabled: false,
 
+  canvas: null,
   canvasContext: null,
   drawing: false,
 
-  gamePosition: {
-    x: 50,
-    y: 50
-  }
+  gamePosition: { x: 5, y: 5 },
+  remotePlayers: new Map()
 };
-
-/* =========================================================
-   DOM REFERENCES
-========================================================= */
 
 const $ = (id) => document.getElementById(id);
 
-let screens;
-
+let screens = {};
 let usernameInput;
 let roomCodeInput;
 let createRoomBtn;
 let joinRoomBtn;
 let cancelRequestBtn;
-let roomCodeDisplay;
-let copyRoomBtn;
 let leaveRoomBtn;
-
+let copyRoomBtn;
 let pendingSection;
 let pendingRequests;
 let participantsList;
 let participantCount;
 let pendingCount;
-
 let messagesContainer;
 let chatForm;
 let messageInput;
-
 let toastElement;
-
 let cameraBtn;
 let micBtn;
 let localVideo;
 let remoteVideos;
-
-/* =========================================================
-   PEERJS CONFIGURATION
-========================================================= */
 
 const PEER_CONFIG = {
   host: "0.peerjs.com",
@@ -82,44 +57,19 @@ const PEER_CONFIG = {
   path: "/",
   secure: true,
   debug: 1,
-
   config: {
     iceServers: [
-      {
-        urls: "stun:stun.l.google.com:19302"
-      },
-      {
-        urls: "stun:stun1.l.google.com:19302"
-      },
-      {
-        urls: "stun:stun2.l.google.com:19302"
-      },
-      {
-        urls: "stun:stun.cloudflare.com:3478"
-      },
-      {
-        urls: "turn:openrelay.metered.ca:80",
-        username: "openrelay",
-        credential: "openrelay"
-      },
-      {
-        urls: "turn:openrelay.metered.ca:443",
-        username: "openrelay",
-        credential: "openrelay"
-      }
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" },
+      { urls: "stun:stun.cloudflare.com:3478" }
     ]
   }
 };
 
-/* =========================================================
-   INITIALIZATION
-========================================================= */
-
 document.addEventListener("DOMContentLoaded", () => {
   initializeDOM();
-  bindMainButtons();
-
-  console.log("MINGLE initialized successfully.");
+  bindButtons();
+  setupTabs();
 });
 
 function initializeDOM() {
@@ -135,9 +85,8 @@ function initializeDOM() {
   createRoomBtn = $("createRoomBtn");
   joinRoomBtn = $("joinRoomBtn");
   cancelRequestBtn = $("cancelRequestBtn");
-  roomCodeDisplay = $("displayRoomCode");
-  copyRoomBtn = $("copyRoomBtn");
   leaveRoomBtn = $("leaveRoomBtn");
+  copyRoomBtn = $("copyRoomBtn");
 
   pendingSection = $("pendingSection");
   pendingRequests = $("pendingRequests");
@@ -157,34 +106,24 @@ function initializeDOM() {
   remoteVideos = $("remoteVideos");
 }
 
-function bindMainButtons() {
-  if (createRoomBtn) {
-    createRoomBtn.onclick = createRoom;
-  }
+function bindButtons() {
+  createRoomBtn?.addEventListener("click", createRoom);
+  joinRoomBtn?.addEventListener("click", joinRoom);
+  cancelRequestBtn?.addEventListener("click", cancelJoinRequest);
+  leaveRoomBtn?.addEventListener("click", leaveRoom);
+  copyRoomBtn?.addEventListener("click", copyRoomCode);
 
-  if (joinRoomBtn) {
-    joinRoomBtn.onclick = joinRoom;
-  }
+  chatForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    sendChatMessage();
+  });
 
-  if (cancelRequestBtn) {
-    cancelRequestBtn.onclick = cancelJoinRequest;
-  }
-
-  if (leaveRoomBtn) {
-    leaveRoomBtn.onclick = leaveRoom;
-  }
-
-  if (copyRoomBtn) {
-    copyRoomBtn.onclick = copyRoomCode;
-  }
+  cameraBtn?.addEventListener("click", toggleCamera);
+  micBtn?.addEventListener("click", toggleMic);
 }
 
-/* =========================================================
-   HELPERS
-========================================================= */
-
-function getRoomPeerId(code) {
-  return `mingle-room-${code.toUpperCase().trim()}`;
+function getRoomPeerId(roomCode) {
+  return `mingle-room-${roomCode}`;
 }
 
 function generateRoomCode() {
@@ -192,9 +131,7 @@ function generateRoomCode() {
   let code = "";
 
   for (let i = 0; i < 6; i++) {
-    code += characters.charAt(
-      Math.floor(Math.random() * characters.length)
-    );
+    code += characters[Math.floor(Math.random() * characters.length)];
   }
 
   return code;
@@ -202,100 +139,56 @@ function generateRoomCode() {
 
 function escapeHtml(value) {
   return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
-function showScreen(screenName) {
-  if (!screens) return;
-
+function showScreen(name) {
   Object.values(screens).forEach((screen) => {
-    if (screen) {
-      screen.classList.add("hidden");
-    }
+    screen?.classList.add("hidden");
   });
 
-  if (screens[screenName]) {
-    screens[screenName].classList.remove("hidden");
-  }
+  screens[name]?.classList.remove("hidden");
 }
 
 function showToast(message, type = "info") {
-  if (!toastElement) {
-    console.log(message);
-    return;
-  }
+  if (!toastElement) return;
 
   toastElement.textContent = message;
-  toastElement.className = `toast ${type}`;
-  toastElement.classList.add("show");
+  toastElement.className = `toast show ${type}`;
 
-  clearTimeout(showToast.timeout);
+  clearTimeout(showToast.timer);
 
-  showToast.timeout = setTimeout(() => {
+  showToast.timer = setTimeout(() => {
     toastElement.classList.remove("show");
   }, 3500);
 }
 
 function setStatus(message) {
   const status = $("lobbyStatus");
-
-  if (status) {
-    status.textContent = message;
-  }
+  if (status) status.textContent = message;
 }
 
 function setText(id, value) {
   const element = $(id);
-
-  if (element) {
-    element.textContent = value;
-  }
+  if (element) element.textContent = value;
 }
 
-async function copyRoomCode() {
-  if (!state.roomCode) return;
-
-  try {
-    await navigator.clipboard.writeText(state.roomCode);
-    showToast("Room code copied!", "success");
-  } catch {
-    const input = document.createElement("input");
-
-    input.value = state.roomCode;
-    document.body.appendChild(input);
-    input.select();
-    document.execCommand("copy");
-    input.remove();
-
-    showToast("Room code copied!", "success");
-  }
-}
-
-/* =========================================================
-   PEERJS CORE
-========================================================= */
-
-function createPeer(customId = null) {
+function createPeer(peerId = null) {
   return new Promise((resolve, reject) => {
     if (typeof Peer === "undefined") {
-      reject(
-        new Error(
-          "PeerJS is missing. Load PeerJS before app.js."
-        )
-      );
-
+      reject(new Error("PeerJS is not loaded."));
       return;
     }
 
-    let settled = false;
+    let finished = false;
 
     try {
-      state.peer = customId
-        ? new Peer(customId, PEER_CONFIG)
+      state.peer = peerId
+        ? new Peer(peerId, PEER_CONFIG)
         : new Peer(PEER_CONFIG);
     } catch (error) {
       reject(error);
@@ -303,76 +196,50 @@ function createPeer(customId = null) {
     }
 
     const timeout = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-
-        reject(
-          new Error(
-            "PeerJS signaling server timed out."
-          )
-        );
+      if (!finished) {
+        finished = true;
+        reject(new Error("PeerJS connection timed out."));
       }
     }, 20000);
 
     state.peer.on("open", (id) => {
       clearTimeout(timeout);
-
       state.peerId = id;
 
-      console.log("PEER OPENED:", id);
-
-      if (!settled) {
-        settled = true;
+      if (!finished) {
+        finished = true;
         resolve(id);
       }
     });
 
     state.peer.on("connection", (connection) => {
-      console.log(
-        "INCOMING CONNECTION RECEIVED:",
-        connection.peer
-      );
-
       setupConnection(connection);
     });
 
-    state.peer.on("call", (call) => {
-      handleIncomingCall(call);
+    state.peer.on("call", handleIncomingCall);
+
+    state.peer.on("disconnected", () => {
+      if (state.peer && !state.peer.destroyed) {
+        state.peer.reconnect();
+      }
     });
 
     state.peer.on("error", (error) => {
-      console.error("PEERJS ERROR:", error);
+      console.error("PeerJS error:", error);
 
-      if (!settled) {
+      if (!finished) {
         clearTimeout(timeout);
-        settled = true;
+        finished = true;
         reject(error);
         return;
       }
 
       if (error.type === "unavailable-id") {
-        showToast(
-          "That room code is already active. Try again.",
-          "error"
-        );
+        showToast("That room code is already in use.", "error");
       } else if (error.type === "peer-unavailable") {
-        showToast(
-          "Room not found or host is offline.",
-          "error"
-        );
+        showToast("Room not found or host is offline.", "error");
       } else {
-        showToast(
-          "Network connection problem occurred.",
-          "error"
-        );
-      }
-    });
-
-    state.peer.on("disconnected", () => {
-      console.warn("Peer disconnected. Reconnecting...");
-
-      if (state.peer && !state.peer.destroyed) {
-        state.peer.reconnect();
+        showToast("Network connection problem.", "error");
       }
     });
   });
@@ -384,96 +251,77 @@ function setupConnection(connection) {
   state.connections.set(connection.peer, connection);
 
   connection.on("open", () => {
-    console.log(
-      "DATA CONNECTION OPEN:",
-      connection.peer
-    );
+    console.log("Connection opened:", connection.peer);
   });
 
   connection.on("data", (payload) => {
-    console.log("DATA RECEIVED:", payload);
-
     handlePayload(payload, connection);
   });
 
   connection.on("close", () => {
-    console.log(
-      "CONNECTION CLOSED:",
-      connection.peer
-    );
-
     state.connections.delete(connection.peer);
     state.pendingRequests.delete(connection.peer);
     state.calls.delete(connection.peer);
 
     removeParticipant(connection.peer);
+    removeRemoteVideo(connection.peer);
     renderPendingRequests();
 
     if (state.isHost) {
-      broadcast({
-        type: "PARTICIPANTS_UPDATE",
-        participants: state.participants
-      });
+      broadcastParticipants();
     } else if (connection.peer === state.hostPeerId) {
-      showToast(
-        "Host left the room. Session ended.",
-        "error"
-      );
-
+      showToast("The host left the room.", "error");
       resetToLobby();
     }
   });
 
   connection.on("error", (error) => {
-    console.error(
-      "DATA CONNECTION ERROR:",
-      error
-    );
+    console.error("Connection error:", error);
   });
+}
+
+function sendConnection(connection, payload) {
+  if (!connection || !connection.open) return false;
+
+  try {
+    connection.send(payload);
+    return true;
+  } catch (error) {
+    console.error("Send error:", error);
+    return false;
+  }
 }
 
 function broadcast(payload, exceptPeerId = null) {
   state.connections.forEach((connection, peerId) => {
-    if (peerId === exceptPeerId) return;
-
-    if (connection.open) {
-      try {
-        connection.send(payload);
-      } catch (error) {
-        console.error("Broadcast error:", error);
-      }
+    if (peerId !== exceptPeerId) {
+      sendConnection(connection, payload);
     }
   });
 }
 
 function sendToHost(payload) {
-  if (!state.connection) {
-    console.warn("No connection to host.");
-    return;
-  }
-
-  if (!state.connection.open) {
-    console.warn("Host connection is not open.");
-    return;
-  }
-
-  try {
-    state.connection.send(payload);
-  } catch (error) {
-    console.error("Send to host error:", error);
-  }
+  sendConnection(state.hostConnection, payload);
 }
 
-/* =========================================================
-   PAYLOAD HANDLING
-========================================================= */
-
 function handlePayload(payload, connection) {
-  if (!payload || !payload.type) return;
+  if (!payload?.type) return;
 
   switch (payload.type) {
     case "JOIN_REQUEST":
-      handleJoinRequest(payload, connection);
+      if (state.isHost) {
+        state.pendingRequests.set(connection.peer, {
+          username: payload.username,
+          connection
+        });
+
+        renderPendingRequests();
+
+        showToast(
+          `${payload.username} requested to join.`,
+          "success"
+        );
+      }
       break;
 
     case "JOIN_RESPONSE":
@@ -481,7 +329,12 @@ function handlePayload(payload, connection) {
       break;
 
     case "PARTICIPANTS_UPDATE":
-      state.participants = payload.participants || [];
+      state.participants.clear();
+
+      (payload.participants || []).forEach((participant) => {
+        state.participants.set(participant.id, participant);
+      });
+
       renderParticipants();
       break;
 
@@ -491,15 +344,10 @@ function handlePayload(payload, connection) {
       if (state.isHost) {
         broadcast(payload, connection.peer);
       }
-
       break;
 
     case "REJECTED":
-      showToast(
-        "The host rejected your join request.",
-        "error"
-      );
-
+      showToast("Your request was rejected.", "error");
       resetToLobby();
       break;
 
@@ -507,21 +355,13 @@ function handlePayload(payload, connection) {
       if (state.isHost) {
         state.pendingRequests.delete(connection.peer);
         renderPendingRequests();
-
-        showToast(
-          `${payload.username || "Participant"} cancelled their request.`
-        );
       }
-
       break;
 
-    case "CANVAS_UPDATE":
-      drawRemoteCanvas(payload);
-
-      if (state.isHost) {
-        broadcast(payload, connection.peer);
-      }
-
+    case "CANVAS_START":
+    case "CANVAS_DRAW":
+    case "CANVAS_END":
+      handleCanvasPayload(payload, connection);
       break;
 
     case "GAME_UPDATE":
@@ -530,20 +370,9 @@ function handlePayload(payload, connection) {
       if (state.isHost) {
         broadcast(payload, connection.peer);
       }
-
       break;
-
-    default:
-      console.warn(
-        "Unknown payload type:",
-        payload.type
-      );
   }
 }
-
-/* =========================================================
-   ROOM CREATION
-========================================================= */
 
 async function createRoom() {
   const username = usernameInput?.value.trim();
@@ -554,62 +383,29 @@ async function createRoom() {
   }
 
   state.username = username;
-  state.isHost = true;
   state.roomCode = generateRoomCode();
   state.hostPeerId = getRoomPeerId(state.roomCode);
+  state.isHost = true;
 
   setStatus("Creating room...");
 
   try {
     await createPeer(state.hostPeerId);
 
-    addParticipant(
-      state.peerId,
-      state.username,
-      true
-    );
+    addParticipant(state.peerId, state.username, true);
 
-    setText("displayRoomCode", state.roomCode);
-    setText("currentUserName", state.username);
-    setText(
-      "roomTitle",
-      `MINGLE Room ${state.roomCode}`
-    );
-
-    showScreen("app");
-
-    renderParticipants();
-    renderPendingRequests();
-    setupAllFeatures();
-
-    setStatus("");
+    enterRoom();
 
     showToast(
-      `Room created! Share code: ${state.roomCode}`,
+      `Room created. Share code: ${state.roomCode}`,
       "success"
     );
   } catch (error) {
-    console.error("CREATE ROOM ERROR:", error);
-
-    if (state.peer) {
-      state.peer.destroy();
-    }
-
-    state.peer = null;
-    state.isHost = false;
-
-    setStatus("");
-
-    showToast(
-      "Could not create room. Try again.",
-      "error"
-    );
+    console.error(error);
+    resetToLobby();
+    showToast("Could not create room.", "error");
   }
 }
-
-/* =========================================================
-   JOIN ROOM
-========================================================= */
 
 async function joinRoom() {
   const username = usernameInput?.value.trim();
@@ -621,7 +417,7 @@ async function joinRoom() {
   }
 
   if (!roomCode) {
-    showToast("Please enter the room code.", "error");
+    showToast("Please enter a room code.", "error");
     return;
   }
 
@@ -635,39 +431,26 @@ async function joinRoom() {
   try {
     await createPeer();
 
-    const connection = state.peer.connect(
-      state.hostPeerId,
-      {
-        reliable: true,
-        serialization: "json"
-      }
-    );
+    const connection = state.peer.connect(state.hostPeerId, {
+      reliable: true,
+      serialization: "json"
+    });
 
-    state.connection = connection;
-
+    state.hostConnection = connection;
     setupConnection(connection);
 
     const timeout = setTimeout(() => {
       if (!connection.open) {
-        showToast(
-          "Host unreachable. Check the room code.",
-          "error"
-        );
-
         connection.close();
         resetToLobby();
+        showToast("Host is unreachable.", "error");
       }
     }, 20000);
 
     connection.on("open", () => {
       clearTimeout(timeout);
 
-      console.log(
-        "CONNECTED TO HOST:",
-        state.hostPeerId
-      );
-
-      connection.send({
+      sendConnection(connection, {
         type: "JOIN_REQUEST",
         username: state.username,
         roomCode: state.roomCode
@@ -681,374 +464,160 @@ async function joinRoom() {
       setStatus("");
       showScreen("waiting");
     });
-
-    connection.on("error", (error) => {
-      clearTimeout(timeout);
-
-      console.error(
-        "JOIN CONNECTION ERROR:",
-        error
-      );
-
-      showToast(
-        "Could not connect to room host.",
-        "error"
-      );
-
-      resetToLobby();
-    });
   } catch (error) {
-    console.error("JOIN ROOM ERROR:", error);
-
-    setStatus("");
-
-    showToast(
-      "Room not found or host is offline.",
-      "error"
-    );
-
+    console.error(error);
     resetToLobby();
+    showToast("Room not found or host is offline.", "error");
   }
 }
 
-/* =========================================================
-   JOIN REQUEST HANDLING
-========================================================= */
-
-function handleJoinRequest(payload, connection) {
-  console.log(
-    "JOIN REQUEST RECEIVED:",
-    payload,
-    connection?.peer
-  );
-
-  if (!state.isHost) {
-    console.warn(
-      "Received join request but current user is not host."
-    );
-
+function handleJoinResponse(payload) {
+  if (!payload.approved) {
+    showToast("The host rejected your request.", "error");
+    resetToLobby();
     return;
   }
 
-  if (!connection) {
-    console.error(
-      "Join request has no connection."
-    );
+  state.participants.clear();
 
-    return;
-  }
-
-  if (!connection.open) {
-    console.warn(
-      "Join request connection is not open."
-    );
-
-    return;
-  }
-
-  const username =
-    String(
-      payload.username || "Unknown participant"
-    ).trim();
-
-  state.pendingRequests.set(connection.peer, {
-    username,
-    connection
+  (payload.participants || []).forEach((participant) => {
+    state.participants.set(participant.id, participant);
   });
 
+  addParticipant(state.peerId, state.username, false);
+
+  enterRoom();
+
+  showToast("Welcome to MINGLE!", "success");
+}
+
+function enterRoom() {
+  setText("displayRoomCode", state.roomCode);
+  setText("currentUserName", state.username);
+  setText("roomTitle", `MINGLE Room ${state.roomCode}`);
+
+  showScreen("app");
+
+  renderParticipants();
   renderPendingRequests();
+  setupCanvas();
+  setupGame();
 
-  showToast(
-    `${username} requested to join your room.`,
-    "success"
-  );
+  if (state.isHost) {
+    pendingSection?.classList.remove("hidden");
+  } else {
+    pendingSection?.classList.add("hidden");
+  }
 }
-
-/* =========================================================
-   PENDING REQUESTS UI
-========================================================= */
-
-function renderPendingRequests() {
-  if (!pendingRequests) {
-    console.error(
-      "Missing #pendingRequests in index.html"
-    );
-
-    return;
-  }
-
-  pendingRequests.innerHTML = "";
-
-  if (pendingCount) {
-    pendingCount.textContent =
-      state.pendingRequests.size;
-  }
-
-  if (state.isHost && pendingSection) {
-    pendingSection.classList.remove("hidden");
-    pendingSection.style.display = "block";
-    pendingSection.style.visibility = "visible";
-  }
-
-  if (state.pendingRequests.size === 0) {
-    pendingRequests.innerHTML =
-      '<p class="empty-state">No pending requests</p>';
-
-    return;
-  }
-
-  state.pendingRequests.forEach(
-    (request, peerId) => {
-      const card = document.createElement("div");
-
-      card.className = "pending-request";
-
-      card.innerHTML = `
-        <div class="request-user">
-          <strong>${escapeHtml(request.username)}</strong>
-          <small>Wants to join your room</small>
-        </div>
-
-        <div class="request-actions">
-          <button
-            type="button"
-            class="admit-btn"
-            data-peer="${escapeHtml(peerId)}"
-          >
-            Admit
-          </button>
-
-          <button
-            type="button"
-            class="reject-btn"
-            data-peer="${escapeHtml(peerId)}"
-          >
-            Reject
-          </button>
-        </div>
-      `;
-
-      pendingRequests.appendChild(card);
-    }
-  );
-
-  pendingRequests
-    .querySelectorAll(".admit-btn")
-    .forEach((button) => {
-      button.onclick = () => {
-        admitGuest(button.dataset.peer);
-      };
-    });
-
-  pendingRequests
-    .querySelectorAll(".reject-btn")
-    .forEach((button) => {
-      button.onclick = () => {
-        rejectGuest(button.dataset.peer);
-      };
-    });
-}
-
-/* =========================================================
-   ADMIT / REJECT
-========================================================= */
 
 function admitGuest(peerId) {
+  if (!state.isHost) return;
+
   const request = state.pendingRequests.get(peerId);
 
-  if (!request) {
-    showToast(
-      "This request is no longer available.",
-      "error"
-    );
-
+  if (!request || !request.connection?.open) {
+    state.pendingRequests.delete(peerId);
+    renderPendingRequests();
+    showToast("Participant disconnected.", "error");
     return;
   }
 
-  if (
-    !request.connection ||
-    !request.connection.open
-  ) {
-    state.pendingRequests.delete(peerId);
-    renderPendingRequests();
+  addParticipant(peerId, request.username, false);
 
-    showToast(
-      "This participant disconnected.",
-      "error"
-    );
+  sendConnection(request.connection, {
+    type: "JOIN_RESPONSE",
+    approved: true,
+    participants: [...state.participants.values()]
+  });
 
-    return;
-  }
+  state.pendingRequests.delete(peerId);
 
-  try {
-    addParticipant(
-      peerId,
-      request.username,
-      false
-    );
+  broadcastParticipants();
+  renderPendingRequests();
 
-    request.connection.send({
-      type: "JOIN_RESPONSE",
-      approved: true,
-      participants: state.participants
-    });
+  showToast(`${request.username} admitted.`, "success");
 
-    state.pendingRequests.delete(peerId);
-
-    broadcast({
-      type: "PARTICIPANTS_UPDATE",
-      participants: state.participants
-    });
-
-    renderPendingRequests();
-
-    showToast(
-      `${request.username} admitted.`,
-      "success"
-    );
-
-    if (state.localStream) {
-      const call = state.peer.call(
-        peerId,
-        state.localStream
-      );
-
-      state.calls.set(peerId, call);
-
-      call.on("stream", (remoteStream) => {
-        addRemoteVideo(
-          peerId,
-          remoteStream
-        );
-      });
-    }
-  } catch (error) {
-    console.error(
-      "ADMIT GUEST ERROR:",
-      error
-    );
-
-    showToast(
-      "Could not admit this participant.",
-      "error"
-    );
+  if (state.localStream) {
+    startCall(peerId);
   }
 }
 
 function rejectGuest(peerId) {
   const request = state.pendingRequests.get(peerId);
-
   if (!request) return;
 
-  try {
-    if (request.connection?.open) {
-      request.connection.send({
-        type: "JOIN_RESPONSE",
-        approved: false
-      });
-    }
-  } catch (error) {
-    console.error(
-      "REJECT GUEST ERROR:",
-      error
-    );
-  }
+  sendConnection(request.connection, {
+    type: "JOIN_RESPONSE",
+    approved: false
+  });
 
   state.pendingRequests.delete(peerId);
   renderPendingRequests();
 
-  setTimeout(() => {
-    if (request.connection) {
-      request.connection.close();
-    }
-  }, 500);
+  setTimeout(() => request.connection?.close(), 300);
 
   showToast("Request rejected.");
 }
 
-function handleJoinResponse(payload) {
-  if (!payload.approved) {
-    showToast(
-      "Your request was declined by the host.",
-      "error"
-    );
+function renderPendingRequests() {
+  if (!pendingRequests) return;
 
-    resetToLobby();
+  pendingRequests.innerHTML = "";
+
+  if (pendingCount) {
+    pendingCount.textContent = state.pendingRequests.size;
+  }
+
+  if (!state.isHost) {
+    pendingSection?.classList.add("hidden");
     return;
   }
 
-  state.participants =
-    payload.participants || [];
+  pendingSection?.classList.remove("hidden");
 
-  if (
-    !state.participants.some(
-      (participant) =>
-        participant.id === state.peerId
-    )
-  ) {
-    state.participants.push({
-      id: state.peerId,
-      name: state.username,
-      isHost: false
-    });
+  if (state.pendingRequests.size === 0) {
+    pendingRequests.innerHTML =
+      '<p class="empty-state">No pending requests</p>';
+    return;
   }
 
-  setText(
-    "currentUserName",
-    state.username
-  );
+  state.pendingRequests.forEach((request, peerId) => {
+    const card = document.createElement("div");
+    card.className = "pending-card";
 
-  setText(
-    "roomTitle",
-    `MINGLE Room ${state.roomCode}`
-  );
+    card.innerHTML = `
+      <strong>${escapeHtml(request.username)}</strong>
+      <small>Wants to join your room</small>
+      <div class="pending-actions">
+        <button class="admit-btn" type="button">Admit</button>
+        <button class="reject-btn" type="button">Reject</button>
+      </div>
+    `;
 
-  setText(
-    "displayRoomCode",
-    state.roomCode
-  );
+    card.querySelector(".admit-btn").onclick = () => {
+      admitGuest(peerId);
+    };
 
-  renderParticipants();
+    card.querySelector(".reject-btn").onclick = () => {
+      rejectGuest(peerId);
+    };
 
-  showScreen("app");
-  setupAllFeatures();
-
-  showToast(
-    "Welcome to MINGLE!",
-    "success"
-  );
+    pendingRequests.appendChild(card);
+  });
 }
 
-/* =========================================================
-   PARTICIPANTS
-========================================================= */
-
 function addParticipant(id, name, isHost = false) {
-  const existing = state.participants.find(
-    (participant) => participant.id === id
-  );
-
-  if (existing) {
-    existing.name = name;
-    existing.isHost = isHost;
-  } else {
-    state.participants.push({
-      id,
-      name,
-      isHost
-    });
-  }
+  state.participants.set(id, {
+    id,
+    name,
+    isHost
+  });
 
   renderParticipants();
 }
 
 function removeParticipant(id) {
-  state.participants =
-    state.participants.filter(
-      (participant) =>
-        participant.id !== id
-    );
-
+  state.participants.delete(id);
   renderParticipants();
 }
 
@@ -1059,69 +628,68 @@ function renderParticipants() {
 
   state.participants.forEach((participant) => {
     const item = document.createElement("div");
-
-    item.className = "participant-item";
+    item.className = "participant";
 
     item.innerHTML = `
-      <span class="participant-avatar">
-        ${escapeHtml(
-          participant.name
-            ?.charAt(0)
-            ?.toUpperCase() || "?"
-        )}
+      <span class="avatar">
+        ${escapeHtml(participant.name?.charAt(0)?.toUpperCase() || "?")}
       </span>
-
-      <span class="participant-name">
-        ${escapeHtml(participant.name)}
-        ${
-          participant.isHost
-            ? "<small>Host</small>"
-            : ""
-        }
-      </span>
+      <div>
+        <strong>${escapeHtml(participant.name)}</strong>
+        <small>${participant.isHost ? "Host" : "Participant"}</small>
+      </div>
     `;
 
     participantsList.appendChild(item);
   });
 
   if (participantCount) {
-    participantCount.textContent =
-      state.participants.length;
+    participantCount.textContent = state.participants.size;
   }
+
+  renderPrivateUsers();
 }
 
-/* =========================================================
-   CHAT
-========================================================= */
+function broadcastParticipants() {
+  broadcast({
+    type: "PARTICIPANTS_UPDATE",
+    participants: [...state.participants.values()]
+  });
+}
 
-function setupChat() {
-  if (!chatForm) return;
+function setupTabs() {
+  const buttons = document.querySelectorAll(".tab");
+  const panels = document.querySelectorAll(".tab-panel");
 
-  chatForm.onsubmit = (event) => {
-    event.preventDefault();
-    sendChatMessage();
-  };
+  buttons.forEach((button) => {
+    button.addEventListener("click", () => {
+      buttons.forEach((item) => {
+        item.classList.toggle("active", item === button);
+      });
+
+      panels.forEach((panel) => {
+        panel.classList.toggle(
+          "active",
+          panel.id === `${button.dataset.tab}Tab`
+        );
+      });
+    });
+  });
 }
 
 function sendChatMessage() {
-  if (!messageInput) return;
-
-  const text = messageInput.value.trim();
-
+  const text = messageInput?.value.trim();
   if (!text) return;
 
   const message = {
-    id: Date.now(),
+    id: `${state.peerId}-${Date.now()}`,
     sender: state.username,
     senderId: state.peerId,
     text,
-    timestamp: new Date().toLocaleTimeString(
-      [],
-      {
-        hour: "2-digit",
-        minute: "2-digit"
-      }
-    )
+    timestamp: new Date().toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit"
+    })
   };
 
   receiveChatMessage(message);
@@ -1141,80 +709,31 @@ function sendChatMessage() {
 }
 
 function receiveChatMessage(message) {
-  if (!messagesContainer || !message) {
+  if (!messagesContainer || !message) return;
+
+  if (state.messages.some((item) => item.id === message.id)) {
     return;
   }
 
   state.messages.push(message);
 
-  const messageElement =
-    document.createElement("div");
-
-  messageElement.className =
+  const element = document.createElement("div");
+  element.className =
     message.senderId === state.peerId
       ? "message own-message"
       : "message";
 
-  messageElement.innerHTML = `
-    <div class="message-sender">
-      ${escapeHtml(message.sender)}
-    </div>
-
-    <div class="message-text">
-      ${escapeHtml(message.text)}
-    </div>
-
-    <div class="message-time">
-      ${escapeHtml(message.timestamp)}
-    </div>
+  element.innerHTML = `
+    <strong>${escapeHtml(message.sender)}</strong>
+    <p>${escapeHtml(message.text)}</p>
+    <small>${escapeHtml(message.timestamp)}</small>
   `;
 
-  messagesContainer.appendChild(
-    messageElement
-  );
-
-  messagesContainer.scrollTop =
-    messagesContainer.scrollHeight;
+  messagesContainer.appendChild(element);
+  messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
 
-/* =========================================================
-   TABS
-========================================================= */
-
-function setupTabs() {
-  const tabButtons =
-    document.querySelectorAll(".tab");
-
-  const tabPanels =
-    document.querySelectorAll(".tab-panel");
-
-  tabButtons.forEach((button) => {
-    button.onclick = () => {
-      const tabName =
-        button.dataset.tab;
-
-      tabButtons.forEach((tab) => {
-        tab.classList.toggle(
-          "active",
-          tab === button
-        );
-      });
-
-      tabPanels.forEach((panel) => {
-        panel.classList.toggle(
-          "active",
-          panel.id === `${tabName}Tab`
-        );
-      });
-    };
-  });
-}
-
-/* =========================================================
-   CAMERA AND MICROPHONE
-========================================================= */
-
-async function enableCamera() {
+async function toggleCamera() {
   try {
     if (!state.localStream) {
       state.localStream =
@@ -1223,365 +742,272 @@ async function enableCamera() {
           audio: true
         });
 
-      if (localVideo) {
-        localVideo.srcObject =
-          state.localStream;
-
-        localVideo.play().catch(() => {});
-      }
+      localVideo.srcObject = state.localStream;
+      localVideo.play().catch(() => {});
 
       state.cameraEnabled = true;
       state.micEnabled = true;
 
-      if (cameraBtn) {
-        cameraBtn.textContent =
-          "Disable Camera";
-      }
-
-      if (micBtn) {
-        micBtn.textContent =
-          "Disable Mic";
-      }
+      cameraBtn.textContent = "Disable Camera";
+      micBtn.textContent = "Disable Mic";
 
       if (state.isHost) {
-        callAllParticipants();
+        state.connections.forEach((_, peerId) => {
+          startCall(peerId);
+        });
       } else {
-        callHost();
+        startCall(state.hostPeerId);
       }
 
-      showToast(
-        "Camera and microphone enabled.",
-        "success"
-      );
-
+      showToast("Camera and microphone enabled.", "success");
       return;
     }
 
-    state.localStream
-      .getVideoTracks()
-      .forEach((track) => {
-        track.enabled = !track.enabled;
-        state.cameraEnabled = track.enabled;
-      });
+    const track = state.localStream.getVideoTracks()[0];
 
-    if (cameraBtn) {
-      cameraBtn.textContent =
-        state.cameraEnabled
-          ? "Disable Camera"
-          : "Enable Camera";
+    if (track) {
+      track.enabled = !track.enabled;
+      state.cameraEnabled = track.enabled;
+      cameraBtn.textContent = track.enabled
+        ? "Disable Camera"
+        : "Enable Camera";
     }
-
-    showToast(
-      state.cameraEnabled
-        ? "Camera enabled."
-        : "Camera disabled."
-    );
   } catch (error) {
-    console.error(
-      "MEDIA ERROR:",
-      error
-    );
-
-    showToast(
-      "Camera permission denied or device not found.",
-      "error"
-    );
+    console.error(error);
+    showToast("Camera permission was denied.", "error");
   }
 }
 
 async function toggleMic() {
   if (!state.localStream) {
-    await enableCamera();
+    await toggleCamera();
     return;
   }
 
-  state.localStream
-    .getAudioTracks()
-    .forEach((track) => {
-      track.enabled = !track.enabled;
-      state.micEnabled = track.enabled;
-    });
+  const track = state.localStream.getAudioTracks()[0];
 
-  if (micBtn) {
-    micBtn.textContent =
-      state.micEnabled
-        ? "Disable Mic"
-        : "Enable Mic";
+  if (track) {
+    track.enabled = !track.enabled;
+    state.micEnabled = track.enabled;
+
+    micBtn.textContent = track.enabled
+      ? "Disable Mic"
+      : "Enable Mic";
   }
-
-  showToast(
-    state.micEnabled
-      ? "Microphone enabled."
-      : "Microphone disabled."
-  );
 }
 
-function callHost() {
-  if (
-    !state.peer ||
-    !state.localStream ||
-    !state.hostPeerId
-  ) {
-    return;
-  }
+function startCall(peerId) {
+  if (!state.localStream || !state.peer || !peerId) return;
 
-  const call = state.peer.call(
-    state.hostPeerId,
-    state.localStream
-  );
+  if (state.calls.has(peerId)) return;
 
-  state.calls.set(
-    state.hostPeerId,
-    call
-  );
+  const call = state.peer.call(peerId, state.localStream);
+  state.calls.set(peerId, call);
 
-  call.on("stream", (remoteStream) => {
-    addRemoteVideo(
-      state.hostPeerId,
-      remoteStream
-    );
+  call.on("stream", (stream) => {
+    addRemoteVideo(peerId, stream);
   });
-}
 
-function callAllParticipants() {
-  if (
-    !state.peer ||
-    !state.localStream
-  ) {
-    return;
-  }
-
-  state.connections.forEach((connection) => {
-    if (!connection.open) return;
-
-    const call = state.peer.call(
-      connection.peer,
-      state.localStream
-    );
-
-    state.calls.set(
-      connection.peer,
-      call
-    );
-
-    call.on("stream", (remoteStream) => {
-      addRemoteVideo(
-        connection.peer,
-        remoteStream
-      );
-    });
+  call.on("close", () => {
+    state.calls.delete(peerId);
+    removeRemoteVideo(peerId);
   });
 }
 
 function handleIncomingCall(call) {
   if (!call) return;
 
-  if (state.localStream) {
-    call.answer(state.localStream);
-  } else {
-    call.answer();
-  }
-
+  call.answer(state.localStream || undefined);
   state.calls.set(call.peer, call);
 
-  call.on("stream", (remoteStream) => {
-    addRemoteVideo(
-      call.peer,
-      remoteStream
-    );
+  call.on("stream", (stream) => {
+    addRemoteVideo(call.peer, stream);
+  });
+
+  call.on("close", () => {
+    state.calls.delete(call.peer);
+    removeRemoteVideo(call.peer);
   });
 }
 
 function addRemoteVideo(peerId, stream) {
   if (!remoteVideos) return;
 
-  let video = document.querySelector(
-    `video[data-peer="${peerId}"]`
+  let wrapper = remoteVideos.querySelector(
+    `[data-peer="${CSS.escape(peerId)}"]`
   );
 
-  if (!video) {
-    const wrapper =
-      document.createElement("div");
-
+  if (!wrapper) {
+    wrapper = document.createElement("div");
     wrapper.className = "video-card";
     wrapper.dataset.peer = peerId;
 
-    video = document.createElement("video");
-
+    const video = document.createElement("video");
     video.autoplay = true;
     video.playsInline = true;
-    video.dataset.peer = peerId;
 
-    const label =
-      document.createElement("span");
-
-    label.textContent = "Participant";
+    const label = document.createElement("span");
+    label.textContent =
+      state.participants.get(peerId)?.name || "Participant";
 
     wrapper.appendChild(video);
     wrapper.appendChild(label);
-
     remoteVideos.appendChild(wrapper);
   }
 
+  const video = wrapper.querySelector("video");
   video.srcObject = stream;
   video.play().catch(() => {});
 }
 
-function setupMediaControls() {
-  if (cameraBtn) {
-    cameraBtn.onclick = enableCamera;
-  }
-
-  if (micBtn) {
-    micBtn.onclick = toggleMic;
-  }
+function removeRemoteVideo(peerId) {
+  remoteVideos
+    ?.querySelector(`[data-peer="${CSS.escape(peerId)}"]`)
+    ?.remove();
 }
-
-/* =========================================================
-   SHARED CANVAS
-========================================================= */
 
 function setupCanvas() {
   const canvas = $("canvas");
+  if (!canvas || canvas.dataset.ready === "true") return;
 
-  if (!canvas) return;
+  canvas.dataset.ready = "true";
+  state.canvas = canvas;
+  state.canvasContext = canvas.getContext("2d");
 
-  state.canvasContext =
-    canvas.getContext("2d");
-
-  canvas.onmousedown = (event) => {
+  canvas.addEventListener("pointerdown", (event) => {
     state.drawing = true;
 
+    const point = getCanvasPoint(event);
+
     state.canvasContext.beginPath();
+    state.canvasContext.moveTo(point.x, point.y);
 
-    state.canvasContext.moveTo(
-      event.offsetX,
-      event.offsetY
-    );
-  };
+    sendCanvasPayload({
+      type: "CANVAS_START",
+      x: point.x,
+      y: point.y
+    });
+  });
 
-  canvas.onmousemove = (event) => {
+  canvas.addEventListener("pointermove", (event) => {
     if (!state.drawing) return;
 
-    state.canvasContext.lineTo(
-      event.offsetX,
-      event.offsetY
-    );
+    const point = getCanvasPoint(event);
 
-    state.canvasContext.stroke();
+    drawCanvasPoint(point.x, point.y);
 
-    const payload = {
-      type: "CANVAS_UPDATE",
-      x: event.offsetX,
-      y: event.offsetY
-    };
+    sendCanvasPayload({
+      type: "CANVAS_DRAW",
+      x: point.x,
+      y: point.y
+    });
+  });
 
-    if (state.isHost) {
-      broadcast(payload);
-    } else {
-      sendToHost(payload);
-    }
-  };
+  canvas.addEventListener("pointerup", endCanvasDrawing);
+  canvas.addEventListener("pointerleave", endCanvasDrawing);
+}
 
-  canvas.onmouseup = () => {
-    state.drawing = false;
-  };
+function getCanvasPoint(event) {
+  const rect = state.canvas.getBoundingClientRect();
 
-  canvas.onmouseleave = () => {
-    state.drawing = false;
+  return {
+    x: ((event.clientX - rect.left) / rect.width) *
+      state.canvas.width,
+    y: ((event.clientY - rect.top) / rect.height) *
+      state.canvas.height
   };
 }
 
-function drawRemoteCanvas(payload) {
+function drawCanvasPoint(x, y) {
   if (!state.canvasContext) return;
 
-  state.canvasContext.lineTo(
-    payload.x,
-    payload.y
-  );
+  state.canvasContext.lineWidth = 3;
+  state.canvasContext.lineCap = "round";
+  state.canvasContext.strokeStyle = "#7b2348";
 
+  state.canvasContext.lineTo(x, y);
   state.canvasContext.stroke();
 }
 
-/* =========================================================
-   SIMPLE GAME
-========================================================= */
+function endCanvasDrawing() {
+  if (!state.drawing) return;
+
+  state.drawing = false;
+
+  sendCanvasPayload({
+    type: "CANVAS_END"
+  });
+}
+
+function sendCanvasPayload(payload) {
+  if (state.isHost) {
+    broadcast(payload);
+  } else {
+    sendToHost(payload);
+  }
+}
+
+function handleCanvasPayload(payload, connection) {
+  if (!state.canvasContext) return;
+
+  if (payload.type === "CANVAS_START") {
+    state.canvasContext.beginPath();
+    state.canvasContext.moveTo(payload.x, payload.y);
+  }
+
+  if (payload.type === "CANVAS_DRAW") {
+    drawCanvasPoint(payload.x, payload.y);
+  }
+
+  if (payload.type === "CANVAS_END") {
+    state.canvasContext.closePath();
+  }
+
+  if (state.isHost) {
+    broadcast(payload, connection.peer);
+  }
+}
 
 function setupGame() {
   const gameBoard = $("gameBoard");
   const player = $("player");
 
-  if (!gameBoard || !player) return;
+  if (!gameBoard || !player || gameBoard.dataset.ready === "true") {
+    return;
+  }
 
-  document.onkeydown = (event) => {
+  gameBoard.dataset.ready = "true";
+
+  document.addEventListener("keydown", (event) => {
     const key = event.key.toLowerCase();
 
-    const allowedKeys = [
-      "w",
-      "a",
-      "s",
-      "d",
-      "arrowup",
-      "arrowdown",
-      "arrowleft",
-      "arrowright"
-    ];
-
-    if (!allowedKeys.includes(key)) {
+    if (
+      !["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright"]
+        .includes(key)
+    ) {
       return;
     }
 
     event.preventDefault();
 
-    if (
-      key === "w" ||
-      key === "arrowup"
-    ) {
-      state.gamePosition.y =
-        Math.max(
-          0,
-          state.gamePosition.y - 3
-        );
+    if (key === "w" || key === "arrowup") {
+      state.gamePosition.y = Math.max(0, state.gamePosition.y - 3);
     }
 
-    if (
-      key === "s" ||
-      key === "arrowdown"
-    ) {
-      state.gamePosition.y =
-        Math.min(
-          100,
-          state.gamePosition.y + 3
-        );
+    if (key === "s" || key === "arrowdown") {
+      state.gamePosition.y = Math.min(92, state.gamePosition.y + 3);
     }
 
-    if (
-      key === "a" ||
-      key === "arrowleft"
-    ) {
-      state.gamePosition.x =
-        Math.max(
-          0,
-          state.gamePosition.x - 3
-        );
+    if (key === "a" || key === "arrowleft") {
+      state.gamePosition.x = Math.max(0, state.gamePosition.x - 3);
     }
 
-    if (
-      key === "d" ||
-      key === "arrowright"
-    ) {
-      state.gamePosition.x =
-        Math.min(
-          100,
-          state.gamePosition.x + 3
-        );
+    if (key === "d" || key === "arrowright") {
+      state.gamePosition.x = Math.min(92, state.gamePosition.x + 3);
     }
 
-    player.style.left =
-      `${state.gamePosition.x}%`;
-
-    player.style.top =
-      `${state.gamePosition.y}%`;
+    player.style.left = `${state.gamePosition.x}%`;
+    player.style.top = `${state.gamePosition.y}%`;
 
     const payload = {
       type: "GAME_UPDATE",
@@ -1595,165 +1021,143 @@ function setupGame() {
     } else {
       sendToHost(payload);
     }
-  };
+  });
 }
 
 function updateRemoteGame(payload) {
   const gameBoard = $("gameBoard");
+  if (!gameBoard || payload.peerId === state.peerId) return;
 
-  if (!gameBoard) return;
-
-  let player = document.querySelector(
-    `[data-player="${payload.peerId}"]`
-  );
+  let player = state.remotePlayers.get(payload.peerId);
 
   if (!player) {
-    player =
-      document.createElement("div");
+    player = document.createElement("div");
+    player.className = "remote-player";
 
-    player.className =
-      "remote-player";
-
-    player.dataset.player =
-      payload.peerId;
-
-    player.style.position =
-      "absolute";
-
-    player.style.width =
-      "20px";
-
-    player.style.height =
-      "20px";
-
-    player.style.backgroundColor =
-      "#e74c3c";
-
-    player.style.borderRadius =
-      "50%";
+    Object.assign(player.style, {
+      position: "absolute",
+      width: "22px",
+      height: "22px",
+      borderRadius: "50%",
+      background: "#ed91ad",
+      border: "2px solid white"
+    });
 
     gameBoard.appendChild(player);
+    state.remotePlayers.set(payload.peerId, player);
   }
 
-  player.style.left =
-    `${payload.x}%`;
-
-  player.style.top =
-    `${payload.y}%`;
+  player.style.left = `${payload.x}%`;
+  player.style.top = `${payload.y}%`;
 }
 
-/* =========================================================
-   LEAVE AND RESET
-========================================================= */
+function renderPrivateUsers() {
+  const container = $("privateUsers");
+  if (!container) return;
+
+  container.innerHTML = "";
+
+  state.participants.forEach((participant) => {
+    if (participant.id === state.peerId) return;
+
+    const button = document.createElement("button");
+    button.textContent = `Message ${participant.name}`;
+    button.className = "secondary-btn";
+
+    button.onclick = () => {
+      messageInput.value = `@${participant.name} `;
+      messageInput.focus();
+    };
+
+    container.appendChild(button);
+  });
+}
+
+async function copyRoomCode() {
+  if (!state.roomCode) return;
+
+  try {
+    await navigator.clipboard.writeText(state.roomCode);
+    showToast("Room code copied.", "success");
+  } catch {
+    const temporaryInput = document.createElement("input");
+    temporaryInput.value = state.roomCode;
+    document.body.appendChild(temporaryInput);
+    temporaryInput.select();
+    document.execCommand("copy");
+    temporaryInput.remove();
+
+    showToast("Room code copied.", "success");
+  }
+}
 
 function cancelJoinRequest() {
-  if (state.connection?.open) {
-    state.connection.send({
-      type: "CANCEL_REQUEST",
-      username: state.username
-    });
-  }
+  sendToHost({
+    type: "CANCEL_REQUEST",
+    username: state.username
+  });
 
   resetToLobby();
 }
 
 function leaveRoom() {
   if (state.isHost) {
-    broadcast({
-      type: "REJECTED"
-    });
+    broadcast({ type: "REJECTED" });
   }
-
-  state.connections.forEach((connection) => {
-    try {
-      connection.close();
-    } catch (error) {
-      console.error(error);
-    }
-  });
 
   resetToLobby();
 }
 
 function resetToLobby() {
-  if (state.localStream) {
-    state.localStream
-      .getTracks()
-      .forEach((track) => {
-        track.stop();
-      });
-
-    state.localStream = null;
-  }
+  state.localStream?.getTracks().forEach((track) => track.stop());
 
   state.connections.forEach((connection) => {
     try {
       connection.close();
-    } catch {
-      // Ignore closed connections
-    }
+    } catch {}
   });
 
-  if (state.peer) {
+  state.calls.forEach((call) => {
     try {
-      state.peer.destroy();
-    } catch {
-      // Ignore destroyed peer
-    }
-  }
+      call.close();
+    } catch {}
+  });
+
+  try {
+    state.peer?.destroy();
+  } catch {}
 
   state.peer = null;
   state.peerId = null;
   state.hostPeerId = null;
+  state.hostConnection = null;
 
   state.roomCode = "";
   state.username = "";
   state.isHost = false;
 
-  state.connection = null;
-
   state.connections.clear();
   state.pendingRequests.clear();
-  state.participants = [];
+  state.participants.clear();
   state.messages = [];
   state.calls.clear();
+  state.remotePlayers.clear();
 
+  state.localStream = null;
   state.cameraEnabled = false;
   state.micEnabled = false;
 
-  if (messagesContainer) {
-    messagesContainer.innerHTML = "";
-  }
+  if (messagesContainer) messagesContainer.innerHTML = "";
+  if (remoteVideos) remoteVideos.innerHTML = "";
+  if (pendingRequests) pendingRequests.innerHTML = "";
+  if (participantsList) participantsList.innerHTML = "";
 
-  if (remoteVideos) {
-    remoteVideos.innerHTML = "";
-  }
+  if (cameraBtn) cameraBtn.textContent = "Enable Camera";
+  if (micBtn) micBtn.textContent = "Enable Mic";
 
-  if (pendingRequests) {
-    pendingRequests.innerHTML =
-      '<p class="empty-state">No pending requests</p>';
-  }
-
-  if (pendingCount) {
-    pendingCount.textContent = "0";
-  }
-
-  if (participantCount) {
-    participantCount.textContent = "0";
-  }
+  if (pendingCount) pendingCount.textContent = "0";
+  if (participantCount) participantCount.textContent = "0";
 
   setStatus("");
   showScreen("lobby");
-}
-
-/* =========================================================
-   FEATURE SETUP
-========================================================= */
-
-function setupAllFeatures() {
-  setupChat();
-  setupTabs();
-  setupMediaControls();
-  setupCanvas();
-  setupGame();
 }
