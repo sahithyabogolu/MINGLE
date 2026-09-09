@@ -1,1736 +1,865 @@
-"use strict";
-
-const state = {
-  peer: null,
-  peerId: null,
-  hostPeerId: null,
-  hostConnection: null,
-
-  roomCode: "",
-  username: "",
-  isHost: false,
-
-  connections: new Map(),
-  pendingRequests: new Map(),
-  participants: new Map(),
-
-  messages: [],
-  privateMessages: new Map(),
-  selectedPrivateUser: null,
-
-  calls: new Map(),
-  localStream: null,
-  cameraEnabled: false,
-  micEnabled: false,
-
-  canvas: null,
-  canvasContext: null,
-  drawing: false,
-
-  gamePosition: { x: 5, y: 5 },
-  remotePlayers: new Map(),
-
-  initialized: false
-};
-
-const $ = (id) => document.getElementById(id);
-
-let screens;
-let usernameInput;
-let roomCodeInput;
-let pendingSection;
-let pendingRequests;
-let participantsList;
-let participantCount;
-let pendingCount;
-let messagesContainer;
-let chatForm;
-let messageInput;
-let toastElement;
-let cameraBtn;
-let micBtn;
-let localVideo;
-let remoteVideos;
-
-const PEER_CONFIG = {
-  host: "0.peerjs.com",
-  port: 443,
-  path: "/",
-  secure: true,
-  debug: 1,
-  config: {
-    iceServers: [
-      { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:stun1.l.google.com:19302" },
-      { urls: "stun:stun.cloudflare.com:3478" }
-    ]
-  }
-};
-
-document.addEventListener("DOMContentLoaded", initializeApp);
-
-function initializeApp() {
-  if (state.initialized) return;
-
-  state.initialized = true;
-
-  initializeDOM();
-  bindButtons();
-  setupTabs();
-  updateCallButtons();
-}
-
-function initializeDOM() {
-  screens = {
-    lobby: $("lobby"),
-    waiting: $("waiting"),
-    app: $("app")
-  };
-
-  usernameInput = $("username");
-  roomCodeInput = $("roomCode");
-
-  pendingSection = $("pendingSection");
-  pendingRequests = $("pendingRequests");
-  participantsList = $("participants");
-  participantCount = $("participantCount");
-  pendingCount = $("pendingCount");
-
-  messagesContainer = $("messages");
-  chatForm = $("chatForm");
-  messageInput = $("chatInput");
-
-  toastElement = $("toast");
-
-  cameraBtn = $("cameraBtn");
-  micBtn = $("micBtn");
-  localVideo = $("localVideo");
-  remoteVideos = $("remoteVideos");
-}
-
-function bindButtons() {
-  $("createRoomBtn")?.addEventListener("click", createRoom);
-  $("joinRoomBtn")?.addEventListener("click", joinRoom);
-  $("cancelRequestBtn")?.addEventListener("click", cancelJoinRequest);
-  $("leaveRoomBtn")?.addEventListener("click", leaveRoom);
-  $("copyRoomBtn")?.addEventListener("click", copyRoomCode);
-
-  chatForm?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    sendChatMessage();
-  });
-
-  cameraBtn?.addEventListener("click", toggleCamera);
-  micBtn?.addEventListener("click", toggleMic);
-
-  roomCodeInput?.addEventListener("input", () => {
-    roomCodeInput.value = roomCodeInput.value
-      .toUpperCase()
-      .replace(/[^A-Z0-9]/g, "");
-  });
-
-  window.addEventListener("beforeunload", cleanupConnections);
-}
-
-function getRoomPeerId(roomCode) {
-  return `mingle-room-${roomCode}`;
-}
-
-function generateRoomCode() {
-  const characters = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let code = "";
-
-  for (let index = 0; index < 6; index += 1) {
-    code += characters[Math.floor(Math.random() * characters.length)];
-  }
-
-  return code;
-}
-
-function normalizeName(name) {
-  return String(name || "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .slice(0, 24);
-}
-
-function normalizeRoomCode(code) {
-  return String(code || "")
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "")
-    .slice(0, 8);
-}
-
-function showScreen(name) {
-  Object.values(screens || {}).forEach((screen) => {
-    screen?.classList.add("hidden");
-  });
-
-  screens?.[name]?.classList.remove("hidden");
-}
-
-function setStatus(message) {
-  const element = $("lobbyStatus");
-
-  if (element) {
-    element.textContent = message;
-  }
-}
-
-function setText(id, text) {
-  const element = $(id);
-
-  if (element) {
-    element.textContent = text;
-  }
-}
-
-function showToast(message, type = "info") {
-  if (!toastElement) return;
-
-  toastElement.textContent = message;
-  toastElement.className = `toast show ${type}`;
-
-  clearTimeout(showToast.timer);
-
-  showToast.timer = setTimeout(() => {
-    toastElement.classList.remove("show");
-  }, 3500);
-}
-
-function createPeer(peerId = null) {
-  return new Promise((resolve, reject) => {
-    if (typeof Peer === "undefined") {
-      reject(new Error("PeerJS was not loaded."));
-      return;
-    }
-
-    let settled = false;
-
-    try {
-      state.peer = peerId
-        ? new Peer(peerId, PEER_CONFIG)
-        : new Peer(PEER_CONFIG);
-    } catch (error) {
-      reject(error);
-      return;
-    }
-
-    const timeout = setTimeout(() => {
-      if (settled) return;
-
-      settled = true;
-      reject(new Error("PeerJS connection timed out."));
-    }, 20000);
-
-    state.peer.on("open", (id) => {
-      state.peerId = id;
-
-      if (!settled) {
-        settled = true;
-        clearTimeout(timeout);
-        resolve(id);
-      }
-    });
-
-    state.peer.on("connection", (connection) => {
-      setupConnection(connection);
-    });
-
-    state.peer.on("call", handleIncomingCall);
-
-    state.peer.on("disconnected", () => {
-      if (state.peer && !state.peer.destroyed) {
-        state.peer.reconnect();
-      }
-    });
-
-    state.peer.on("error", (error) => {
-      console.error("PeerJS error:", error);
-
-      if (!settled) {
-        settled = true;
-        clearTimeout(timeout);
-        reject(error);
-        return;
-      }
-
-      if (error.type === "unavailable-id") {
-        showToast(
-          "That room code is already in use. Create another room.",
-          "error"
-        );
-      } else if (error.type === "peer-unavailable") {
-        showToast(
-          "Room not found or host is offline.",
-          "error"
-        );
-      } else {
-        showToast(
-          "Network connection problem. Please try again.",
-          "error"
-        );
-      }
-    });
-  });
-}
-
-function setupConnection(connection) {
-  if (!connection || !connection.peer) return;
-
-  const existingConnection = state.connections.get(connection.peer);
-
-  if (existingConnection && existingConnection !== connection) {
-    try {
-      existingConnection.close();
-    } catch {}
-
-    state.connections.delete(connection.peer);
-  }
-
-  state.connections.set(connection.peer, connection);
-
-  connection.on("open", () => {
-    console.log("Connected to:", connection.peer);
-  });
-
-  connection.on("data", (payload) => {
-    handlePayload(payload, connection);
-  });
-
-  connection.on("close", () => {
-    handleConnectionClosed(connection.peer);
-  });
-
-  connection.on("error", (error) => {
-    console.error("Data connection error:", error);
-  });
-}
-
-function handleConnectionClosed(peerId) {
-  state.connections.delete(peerId);
-  state.pendingRequests.delete(peerId);
-  state.calls.delete(peerId);
-
-  removeParticipant(peerId);
-  removeRemoteVideo(peerId);
-  removeRemotePlayer(peerId);
-
-  if (state.isHost) {
-    broadcastParticipants();
-    renderPendingRequests();
-  }
-
-  if (!state.isHost && peerId === state.hostPeerId) {
-    showToast("The host left the room.", "error");
-    resetToLobby();
-  }
-}
-
-function sendConnection(connection, payload) {
-  if (!connection || !connection.open) {
-    return false;
-  }
-
-  try {
-    connection.send(payload);
-    return true;
-  } catch (error) {
-    console.error("Send error:", error);
-    return false;
-  }
-}
-
-function broadcast(payload, exceptPeerId = null) {
-  state.connections.forEach((connection, peerId) => {
-    if (peerId !== exceptPeerId) {
-      sendConnection(connection, payload);
-    }
-  });
-}
-
-function sendToHost(payload) {
-  if (state.isHost) {
-    handlePayload(payload, {
-      peer: state.peerId
-    });
-
-    return true;
-  }
-
-  return sendConnection(state.hostConnection, payload);
-}
-
-function handlePayload(payload, connection) {
-  if (!payload || !payload.type) return;
-
-  switch (payload.type) {
-    case "JOIN_REQUEST":
-      handleJoinRequest(payload, connection);
-      break;
-
-    case "JOIN_RESPONSE":
-      handleJoinResponse(payload);
-      break;
-
-    case "PARTICIPANTS_UPDATE":
-      handleParticipantsUpdate(payload);
-      break;
-
-    case "CHAT_MESSAGE":
-      handleChatMessage(payload, connection);
-      break;
-
-    case "PRIVATE_MESSAGE":
-      handlePrivateMessage(payload);
-      break;
-
-    case "REJECTED":
-      showToast("Your request was rejected.", "error");
-      resetToLobby();
-      break;
-
-    case "CANCEL_REQUEST":
-      if (state.isHost) {
-        state.pendingRequests.delete(connection.peer);
-        renderPendingRequests();
-      }
-      break;
-
-    case "CANVAS_START":
-    case "CANVAS_DRAW":
-    case "CANVAS_END":
-      handleCanvasPayload(payload, connection);
-      break;
-
-    case "CANVAS_CLEAR":
-      clearCanvas(false);
-
-      if (state.isHost) {
-        broadcast(payload, connection.peer);
-      }
-      break;
-
-    case "GAME_UPDATE":
-      handleGameUpdate(payload, connection);
-      break;
-
-    default:
-      console.warn("Unknown payload:", payload.type);
-  }
-}
-
-function handleJoinRequest(payload, connection) {
-  if (!state.isHost || !connection) return;
-
-  const username = normalizeName(payload.username);
-
-  if (!username) {
-    sendConnection(connection, {
-      type: "JOIN_RESPONSE",
-      approved: false
-    });
-
-    return;
-  }
-
-  state.pendingRequests.set(connection.peer, {
-    username,
-    connection
-  });
-
-  renderPendingRequests();
-
-  showToast(`${username} requested to join.`, "success");
-}
-
-function handleParticipantsUpdate(payload) {
-  if (!Array.isArray(payload.participants)) return;
-
-  state.participants.clear();
-
-  payload.participants.forEach((participant) => {
-    if (!participant?.id || !participant?.name) return;
-
-    state.participants.set(participant.id, {
-      id: participant.id,
-      name: participant.name,
-      isHost: Boolean(participant.isHost)
-    });
-  });
-
-  renderParticipants();
-}
-
-function handleChatMessage(payload, connection) {
-  if (!payload.message) return;
-
-  receiveChatMessage(payload.message);
-
-  if (state.isHost && connection?.peer) {
-    broadcast(payload, connection.peer);
-  }
-}
-
-function handlePrivateMessage(payload) {
-  const message = payload.message;
-
-  if (!message) return;
-
-  if (
-    message.receiverPeerId !== state.peerId &&
-    message.senderPeerId !== state.peerId
-  ) {
-    return;
-  }
-
-  receivePrivateMessage(message);
-}
-
-async function createRoom() {
-  const username = normalizeName(usernameInput?.value);
-
-  if (!username) {
-    showToast("Please enter your name.", "error");
-    usernameInput?.focus();
-    return;
-  }
-
-  await resetConnectionOnly();
-
-  state.username = username;
-  state.roomCode = generateRoomCode();
-  state.hostPeerId = getRoomPeerId(state.roomCode);
-  state.isHost = true;
-
-  setStatus("Creating room...");
-
-  try {
-    await createPeer(state.hostPeerId);
-
-    addParticipant(state.peerId, state.username, true);
-    enterRoom();
-
-    showToast(
-      `Room created. Share code: ${state.roomCode}`,
-      "success"
-    );
-  } catch (error) {
-    console.error("Create room error:", error);
-    await resetConnectionOnly();
-    setStatus("Could not create room. Please try again.");
-    showToast("Could not create room.", "error");
-  }
-}
-
-async function joinRoom() {
-  const username = normalizeName(usernameInput?.value);
-  const roomCode = normalizeRoomCode(roomCodeInput?.value);
-
-  if (!username) {
-    showToast("Please enter your name.", "error");
-    usernameInput?.focus();
-    return;
-  }
-
-  if (!roomCode) {
-    showToast("Please enter a room code.", "error");
-    roomCodeInput?.focus();
-    return;
-  }
-
-  await resetConnectionOnly();
-
-  state.username = username;
-  state.roomCode = roomCode;
-  state.hostPeerId = getRoomPeerId(roomCode);
-  state.isHost = false;
-
-  setStatus("Connecting to host...");
-
-  try {
-    await createPeer();
-
-    const connection = state.peer.connect(state.hostPeerId, {
-      reliable: true,
-      serialization: "json"
-    });
-
-    state.hostConnection = connection;
-    setupConnection(connection);
-
-    const timeout = setTimeout(() => {
-      if (!connection.open) {
-        try {
-          connection.close();
-        } catch {}
-
-        resetToLobby();
-        showToast("Host is unreachable.", "error");
-      }
-    }, 20000);
-
-    connection.on("open", () => {
-      clearTimeout(timeout);
-
-      sendConnection(connection, {
-        type: "JOIN_REQUEST",
-        username: state.username,
-        roomCode: state.roomCode
-      });
-
-      setText(
-        "waitingText",
-        `Your request has been sent to room ${state.roomCode}. Waiting for approval...`
-      );
-
-      showScreen("waiting");
-    });
-  } catch (error) {
-    console.error("Join room error:", error);
-    await resetConnectionOnly();
-    setStatus("Room not found or host is offline.");
-    showToast("Room not found or host is offline.", "error");
-  }
-}
-
-function handleJoinResponse(payload) {
-  if (!payload.approved) {
-    showToast("The host rejected your request.", "error");
-    resetToLobby();
-    return;
-  }
-
-  state.participants.clear();
-
-  (payload.participants || []).forEach((participant) => {
-    state.participants.set(participant.id, participant);
-  });
-
-  if (!state.participants.has(state.peerId)) {
-    addParticipant(state.peerId, state.username, false);
-  }
-
-  enterRoom();
-
-  showToast("Welcome to MINGLE!", "success");
-}
-
-function enterRoom() {
-  setText("displayRoomCode", state.roomCode);
-  setText("currentUserName", state.username);
-  setText("roomTitle", `MINGLE Room ${state.roomCode}`);
-  setText("connectionStatus", "Connected");
-
-  showScreen("app");
-
-  renderParticipants();
-  renderPendingRequests();
-  setupCanvas();
-  setupGame();
-  updateCallButtons();
-
-  if (state.isHost) {
-    pendingSection?.classList.remove("hidden");
-  } else {
-    pendingSection?.classList.add("hidden");
-  }
-}
-
-function admitGuest(peerId) {
-  if (!state.isHost) return;
-
-  const request = state.pendingRequests.get(peerId);
-
-  if (!request) return;
-
-  addParticipant(peerId, request.username, false);
-
-  const approved = sendConnection(request.connection, {
-    type: "JOIN_RESPONSE",
-    approved: true,
-    participants: [...state.participants.values()]
-  });
-
-  if (!approved) {
-    removeParticipant(peerId);
-    showToast("Could not admit that participant.", "error");
-    return;
-  }
-
-  state.pendingRequests.delete(peerId);
-
-  broadcastParticipants();
-  renderPendingRequests();
-
-  showToast(`${request.username} admitted.`, "success");
-}
-
-function rejectGuest(peerId) {
-  const request = state.pendingRequests.get(peerId);
-
-  if (!request) return;
-
-  sendConnection(request.connection, {
-    type: "JOIN_RESPONSE",
-    approved: false
-  });
-
-  state.pendingRequests.delete(peerId);
-  renderPendingRequests();
-
-  setTimeout(() => {
-    try {
-      request.connection.close();
-    } catch {}
-  }, 300);
-}
-
-function renderPendingRequests() {
-  if (!pendingRequests) return;
-
-  pendingRequests.replaceChildren();
-
-  if (pendingCount) {
-    pendingCount.textContent = state.pendingRequests.size;
-  }
-
-  if (!state.isHost) {
-    pendingSection?.classList.add("hidden");
-    return;
-  }
-
-  pendingSection?.classList.remove("hidden");
-
-  if (state.pendingRequests.size === 0) {
-    const empty = document.createElement("p");
-    empty.className = "muted";
-    empty.textContent = "No pending requests";
-    pendingRequests.appendChild(empty);
-    return;
-  }
-
-  state.pendingRequests.forEach((request, peerId) => {
-    const card = document.createElement("div");
-    card.className = "pending-card";
-
-    const name = document.createElement("strong");
-    name.textContent = request.username;
-
-    const description = document.createElement("small");
-    description.textContent = "Wants to join your room";
-
-    const actions = document.createElement("div");
-    actions.className = "pending-actions";
-
-    const admitButton = document.createElement("button");
-    admitButton.className = "admit-btn";
-    admitButton.type = "button";
-    admitButton.textContent = "Admit";
-    admitButton.addEventListener("click", () => admitGuest(peerId));
-
-    const rejectButton = document.createElement("button");
-    rejectButton.className = "reject-btn";
-    rejectButton.type = "button";
-    rejectButton.textContent = "Reject";
-    rejectButton.addEventListener("click", () => rejectGuest(peerId));
-
-    actions.append(admitButton, rejectButton);
-    card.append(name, description, actions);
-    pendingRequests.appendChild(card);
-  });
-}
-
-function addParticipant(id, name, isHost = false) {
-  if (!id || !name) return;
-
-  state.participants.set(id, {
-    id,
-    name,
-    isHost: Boolean(isHost)
-  });
-
-  renderParticipants();
-}
-
-function removeParticipant(id) {
-  state.participants.delete(id);
-  renderParticipants();
-}
-
-function renderParticipants() {
-  if (!participantsList) return;
-
-  participantsList.replaceChildren();
-
-  state.participants.forEach((participant) => {
-    const item = document.createElement("div");
-    item.className = "participant";
-
-    const avatar = document.createElement("span");
-    avatar.className = "avatar";
-    avatar.textContent =
-      participant.name?.charAt(0)?.toUpperCase() || "?";
-
-    const details = document.createElement("div");
-
-    const name = document.createElement("strong");
-    name.textContent = participant.name;
-
-    const role = document.createElement("small");
-    role.textContent = participant.isHost ? "Host" : "Participant";
-
-    details.append(name, role);
-    item.append(avatar, details);
-    participantsList.appendChild(item);
-  });
-
-  if (participantCount) {
-    participantCount.textContent = state.participants.size;
-  }
-
-  renderPrivateUsers();
-}
-
-function broadcastParticipants() {
-  if (!state.isHost) return;
-
-  broadcast({
-    type: "PARTICIPANTS_UPDATE",
-    participants: [...state.participants.values()]
-  });
-}
-
-function setupTabs() {
-  document.querySelectorAll(".tab").forEach((button) => {
-    button.addEventListener("click", () => {
-      document.querySelectorAll(".tab").forEach((tab) => {
-        tab.classList.toggle("active", tab === button);
-      });
-
-      document.querySelectorAll(".tab-panel").forEach((panel) => {
-        panel.classList.toggle(
-          "active",
-          panel.id === `${button.dataset.tab}Tab`
-        );
-      });
-    });
-  });
-}
-
-function sendChatMessage() {
-  const text = messageInput?.value.trim();
-
-  if (!text || !state.peerId) return;
-
-  const message = {
-    id: `${state.peerId}-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2, 7)}`,
-    sender: state.username,
-    senderId: state.peerId,
-    text,
-    timestamp: new Date().toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit"
-    })
-  };
-
-  receiveChatMessage(message);
-
-  const payload = {
-    type: "CHAT_MESSAGE",
-    message
-  };
-
-  if (state.isHost) {
-    broadcast(payload);
-  } else {
-    sendToHost(payload);
-  }
-
-  messageInput.value = "";
-}
-
-function receiveChatMessage(message) {
-  if (!message || !messagesContainer) return;
-
-  if (state.messages.some((item) => item.id === message.id)) {
-    return;
-  }
-
-  state.messages.push(message);
-
-  const element = document.createElement("div");
-  element.className =
-    message.senderId === state.peerId
-      ? "message own-message"
-      : "message";
-
-  const sender = document.createElement("strong");
-  sender.textContent = message.sender || "Participant";
-
-  const text = document.createElement("p");
-  text.textContent = message.text || "";
-
-  const time = document.createElement("small");
-  time.textContent = message.timestamp || "";
-
-  element.append(sender, text, time);
-  messagesContainer.appendChild(element);
-  messagesContainer.scrollTop = messagesContainer.scrollHeight;
-}
-
-function renderPrivateUsers() {
-  const container = $("privateUsers");
-
-  if (!container) return;
-
-  container.replaceChildren();
-
-  const otherParticipants = [...state.participants.values()].filter(
-    (participant) => participant.id !== state.peerId
-  );
-
-  if (otherParticipants.length === 0) {
-    const empty = document.createElement("p");
-    empty.className = "muted";
-    empty.textContent = "No other participants are currently in the room.";
-    container.appendChild(empty);
-    return;
-  }
-
-  otherParticipants.forEach((participant) => {
-    const button = document.createElement("button");
-    button.className = "secondary-btn";
-    button.type = "button";
-    button.textContent =
-      state.selectedPrivateUser === participant.id
-        ? `Chatting with ${participant.name}`
-        : `Message ${participant.name}`;
-
-    button.addEventListener("click", () => {
-      selectPrivateUser(participant.id);
-    });
-
-    container.appendChild(button);
-  });
-
-  renderPrivateConversation();
-}
-
-function selectPrivateUser(peerId) {
-  if (!state.participants.has(peerId)) return;
-
-  state.selectedPrivateUser = peerId;
-  renderPrivateUsers();
-}
-
-function renderPrivateConversation() {
-  const container = $("privateUsers");
-
-  if (!container || !state.selectedPrivateUser) return;
-
-  const participant = state.participants.get(state.selectedPrivateUser);
-
-  if (!participant) return;
-
-  const wrapper = document.createElement("div");
-  wrapper.className = "private-conversation";
-
-  const title = document.createElement("h4");
-  title.textContent = `Private conversation with ${participant.name}`;
-
-  const history = document.createElement("div");
-  history.className = "private-history";
-
-  const key = getConversationKey(
-    state.peerId,
-    state.selectedPrivateUser
-  );
-
-  const conversation = state.privateMessages.get(key) || [];
-
-  if (conversation.length === 0) {
-    const empty = document.createElement("p");
-    empty.className = "muted";
-    empty.textContent = "No private messages yet.";
-    history.appendChild(empty);
-  } else {
-    conversation.forEach((message) => {
-      const item = document.createElement("div");
-      item.className =
-        message.senderPeerId === state.peerId
-          ? "message own-message"
-          : "message";
-
-      const sender = document.createElement("strong");
-      sender.textContent = message.senderName;
-
-      const text = document.createElement("p");
-      text.textContent = message.text;
-
-      const time = document.createElement("small");
-      time.textContent = message.timestamp;
-
-      item.append(sender, text, time);
-      history.appendChild(item);
-    });
-  }
-
-  const form = document.createElement("form");
-  form.className = "message-form";
-
-  const input = document.createElement("input");
-  input.maxLength = 500;
-  input.placeholder = `Message ${participant.name}`;
-  input.autocomplete = "off";
-
-  const sendButton = document.createElement("button");
-  sendButton.className = "primary-btn";
-  sendButton.type = "submit";
-  sendButton.textContent = "Send";
-
-  form.append(input, sendButton);
-
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-
-    const text = input.value.trim();
-
-    if (!text) return;
-
-    sendPrivateMessage(participant.id, text);
-    input.value = "";
-    input.focus();
-  });
-
-  wrapper.append(title, history, form);
-  container.appendChild(wrapper);
-
-  history.scrollTop = history.scrollHeight;
-}
-
-function getConversationKey(firstId, secondId) {
-  return [firstId, secondId].sort().join("::");
-}
-
-function sendPrivateMessage(receiverPeerId, text) {
-  if (!receiverPeerId || receiverPeerId === state.peerId) {
-    showToast("You cannot message yourself.", "error");
-    return;
-  }
-
-  if (!state.participants.has(receiverPeerId)) {
-    showToast("That participant is no longer in the room.", "error");
-    return;
-  }
-
-  const message = {
-    id: `${state.peerId}-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2, 7)}`,
-    type: "PRIVATE_MESSAGE",
-    senderPeerId: state.peerId,
-    receiverPeerId,
-    senderName: state.username,
-    text,
-    timestamp: new Date().toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit"
-    })
-  };
-
-  receivePrivateMessage(message);
-
-  const directConnection = state.connections.get(receiverPeerId);
-
-  if (directConnection?.open) {
-    sendConnection(directConnection, {
-      type: "PRIVATE_MESSAGE",
-      message
-    });
-  } else if (state.isHost) {
-    const participantConnection = state.connections.get(receiverPeerId);
-
-    sendConnection(participantConnection, {
-      type: "PRIVATE_MESSAGE",
-      message
-    });
-  } else {
-    sendToHost({
-      type: "PRIVATE_MESSAGE",
-      message
-    });
-  }
-}
-
-function receivePrivateMessage(message) {
-  const key = getConversationKey(
-    message.senderPeerId,
-    message.receiverPeerId
-  );
-
-  if (!state.privateMessages.has(key)) {
-    state.privateMessages.set(key, []);
-  }
-
-  const conversation = state.privateMessages.get(key);
-
-  if (conversation.some((item) => item.id === message.id)) {
-    return;
-  }
-
-  conversation.push(message);
-
-  if (
-    state.selectedPrivateUser === message.senderPeerId ||
-    state.selectedPrivateUser === message.receiverPeerId
-  ) {
-    renderPrivateConversation();
-  } else {
-    showToast(`New private message from ${message.senderName}`, "success");
-  }
-}
-
-async function toggleCamera() {
-  try {
-    if (!state.localStream) {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true
-      });
-
-      state.localStream = stream;
-      state.cameraEnabled = stream.getVideoTracks().length > 0;
-      state.micEnabled = stream.getAudioTracks().length > 0;
-
-      if (localVideo) {
-        localVideo.srcObject = stream;
-        localVideo.muted = true;
-        await localVideo.play().catch(() => {});
-      }
-
-      updateCallButtons();
-
-      state.participants.forEach((participant) => {
-        if (participant.id !== state.peerId) {
-          startCall(participant.id);
+/**
+ * MINGLE - Core Real-Time Application Logic
+ */
+
+(function () {
+    'use strict';
+
+    // APP STATE
+    const state = {
+        peer: null,
+        peerId: null,
+        roomCode: null,
+        username: '',
+        isHost: false,
+        connections: {}, // peerId -> DataConnection
+        participants: {}, // peerId -> { username, isHost }
+        pendingApprovals: {}, // peerId -> { username, conn }
+        selectedPrivatePeerId: '',
+        privateMessages: {}, // peerId -> Array of msgs
+        localStream: null,
+        mediaCalls: {}, // peerId -> MediaConnection
+        canvasCtx: null,
+        isDrawing: false,
+        gameState: {
+            activeGame: null,
+            data: {}
         }
-      });
-
-      showToast("Camera and microphone enabled.", "success");
-      return;
-    }
-
-    const videoTrack = state.localStream.getVideoTracks()[0];
-
-    if (!videoTrack) {
-      showToast("No camera track is available.", "error");
-      return;
-    }
-
-    videoTrack.enabled = !videoTrack.enabled;
-    state.cameraEnabled = videoTrack.enabled;
-
-    updateCallButtons();
-  } catch (error) {
-    console.error("Camera error:", error);
-    showToast(
-      "Camera permission was denied or the camera is unavailable.",
-      "error"
-    );
-  }
-}
-
-async function toggleMic() {
-  try {
-    if (!state.localStream) {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true
-      });
-
-      state.localStream = stream;
-      state.micEnabled = stream.getAudioTracks().length > 0;
-      state.cameraEnabled = false;
-
-      if (localVideo) {
-        localVideo.srcObject = stream;
-        localVideo.muted = true;
-      }
-
-      updateCallButtons();
-
-      state.participants.forEach((participant) => {
-        if (participant.id !== state.peerId) {
-          startCall(participant.id);
-        }
-      });
-
-      showToast("Microphone enabled.", "success");
-      return;
-    }
-
-    const audioTrack = state.localStream.getAudioTracks()[0];
-
-    if (!audioTrack) {
-      showToast("No microphone track is available.", "error");
-      return;
-    }
-
-    audioTrack.enabled = !audioTrack.enabled;
-    state.micEnabled = audioTrack.enabled;
-
-    updateCallButtons();
-  } catch (error) {
-    console.error("Microphone error:", error);
-    showToast(
-      "Microphone permission was denied or the microphone is unavailable.",
-      "error"
-    );
-  }
-}
-
-function updateCallButtons() {
-  if (cameraBtn) {
-    cameraBtn.textContent = state.cameraEnabled
-      ? "Disable Camera"
-      : "Enable Camera";
-  }
-
-  if (micBtn) {
-    micBtn.textContent = state.micEnabled
-      ? "Disable Mic"
-      : "Enable Mic";
-  }
-}
-
-function startCall(peerId) {
-  if (!state.localStream || !state.peer || !peerId) return;
-  if (peerId === state.peerId) return;
-
-  const participant = state.participants.get(peerId);
-
-  if (!participant) return;
-
-  const existingCall = state.calls.get(peerId);
-
-  if (existingCall) {
-    try {
-      existingCall.close();
-    } catch {}
-
-    state.calls.delete(peerId);
-  }
-
-  const call = state.peer.call(peerId, state.localStream);
-
-  if (!call) return;
-
-  state.calls.set(peerId, call);
-
-  call.on("stream", (stream) => {
-    addRemoteVideo(peerId, stream);
-  });
-
-  call.on("close", () => {
-    if (state.calls.get(peerId) === call) {
-      state.calls.delete(peerId);
-      removeRemoteVideo(peerId);
-    }
-  });
-
-  call.on("error", (error) => {
-    console.error("Outgoing call error:", error);
-  });
-}
-
-function handleIncomingCall(call) {
-  if (!call) return;
-
-  if (state.localStream) {
-    call.answer(state.localStream);
-  } else {
-    call.answer();
-  }
-
-  state.calls.set(call.peer, call);
-
-  call.on("stream", (stream) => {
-    addRemoteVideo(call.peer, stream);
-  });
-
-  call.on("close", () => {
-    if (state.calls.get(call.peer) === call) {
-      state.calls.delete(call.peer);
-      removeRemoteVideo(call.peer);
-    }
-  });
-
-  call.on("error", (error) => {
-    console.error("Incoming call error:", error);
-  });
-}
-
-function addRemoteVideo(peerId, stream) {
-  if (!remoteVideos || !stream) return;
-
-  let wrapper = [...remoteVideos.children].find(
-    (child) => child.dataset.peer === peerId
-  );
-
-  if (!wrapper) {
-    wrapper = document.createElement("div");
-    wrapper.className = "video-card";
-    wrapper.dataset.peer = peerId;
-
-    const video = document.createElement("video");
-    video.autoplay = true;
-    video.playsInline = true;
-
-    const label = document.createElement("span");
-    label.textContent =
-      state.participants.get(peerId)?.name || "Participant";
-
-    wrapper.append(video, label);
-    remoteVideos.appendChild(wrapper);
-  }
-
-  const video = wrapper.querySelector("video");
-  video.srcObject = stream;
-  video.play().catch(() => {});
-}
-
-function removeRemoteVideo(peerId) {
-  if (!remoteVideos) return;
-
-  [...remoteVideos.children]
-    .filter((child) => child.dataset.peer === peerId)
-    .forEach((child) => child.remove());
-}
-
-function setupCanvas() {
-  const canvas = $("canvas");
-
-  if (!canvas || canvas.dataset.ready === "true") return;
-
-  canvas.dataset.ready = "true";
-  state.canvas = canvas;
-  state.canvasContext = canvas.getContext("2d");
-
-  canvas.style.touchAction = "none";
-
-  canvas.addEventListener("pointerdown", (event) => {
-    event.preventDefault();
-
-    state.drawing = true;
-
-    try {
-      canvas.setPointerCapture(event.pointerId);
-    } catch {}
-
-    const point = getCanvasPoint(event);
-
-    state.canvasContext.beginPath();
-    state.canvasContext.moveTo(point.x, point.y);
-
-    sendCanvasPayload({
-      type: "CANVAS_START",
-      x: point.x,
-      y: point.y
-    });
-  });
-
-  canvas.addEventListener("pointermove", (event) => {
-    if (!state.drawing) return;
-
-    event.preventDefault();
-
-    const point = getCanvasPoint(event);
-
-    drawCanvasPoint(point.x, point.y);
-
-    sendCanvasPayload({
-      type: "CANVAS_DRAW",
-      x: point.x,
-      y: point.y
-    });
-  });
-
-  canvas.addEventListener("pointerup", endCanvasDrawing);
-  canvas.addEventListener("pointercancel", endCanvasDrawing);
-  canvas.addEventListener("pointerleave", endCanvasDrawing);
-}
-
-function getCanvasPoint(event) {
-  if (!state.canvas) {
-    return { x: 0, y: 0 };
-  }
-
-  const rect = state.canvas.getBoundingClientRect();
-
-  return {
-    x: ((event.clientX - rect.left) / rect.width) * state.canvas.width,
-    y: ((event.clientY - rect.top) / rect.height) * state.canvas.height
-  };
-}
-
-function drawCanvasPoint(x, y) {
-  if (!state.canvasContext) return;
-
-  state.canvasContext.lineWidth = 3;
-  state.canvasContext.lineCap = "round";
-  state.canvasContext.lineJoin = "round";
-  state.canvasContext.strokeStyle = "#7b2348";
-
-  state.canvasContext.lineTo(x, y);
-  state.canvasContext.stroke();
-}
-
-function endCanvasDrawing() {
-  if (!state.drawing) return;
-
-  state.drawing = false;
-
-  sendCanvasPayload({
-    type: "CANVAS_END"
-  });
-}
-
-function sendCanvasPayload(payload) {
-  if (state.isHost) {
-    broadcast(payload);
-  } else {
-    sendToHost(payload);
-  }
-}
-
-function handleCanvasPayload(payload, connection) {
-  if (!state.canvasContext) return;
-
-  if (payload.type === "CANVAS_START") {
-    state.canvasContext.beginPath();
-    state.canvasContext.moveTo(payload.x, payload.y);
-  }
-
-  if (payload.type === "CANVAS_DRAW") {
-    drawCanvasPoint(payload.x, payload.y);
-  }
-
-  if (payload.type === "CANVAS_END") {
-    state.canvasContext.closePath();
-  }
-
-  if (state.isHost && connection?.peer) {
-    broadcast(payload, connection.peer);
-  }
-}
-
-function clearCanvas(announce = true) {
-  if (!state.canvas || !state.canvasContext) return;
-
-  state.canvasContext.clearRect(
-    0,
-    0,
-    state.canvas.width,
-    state.canvas.height
-  );
-
-  if (announce) {
-    const payload = {
-      type: "CANVAS_CLEAR"
     };
 
-    if (state.isHost) {
-      broadcast(payload);
-    } else {
-      sendToHost(payload);
+    // DOM ELEMENTS
+    const el = {
+        lobbyScreen: document.getElementById('lobby-screen'),
+        waitingScreen: document.getElementById('waiting-screen'),
+        roomScreen: document.getElementById('room-screen'),
+        usernameInput: document.getElementById('username-input'),
+        roomCodeInput: document.getElementById('room-code-input'),
+        btnCreateRoom: document.getElementById('btn-create-room'),
+        btnJoinRoom: document.getElementById('btn-join-room'),
+        btnCancelJoin: document.getElementById('btn-cancel-join'),
+        lobbyStatus: document.getElementById('lobby-status'),
+        displayRoomCode: document.getElementById('display-room-code'),
+        btnCopyCode: document.getElementById('btn-copy-code'),
+        btnLeaveRoom: document.getElementById('btn-leave-room'),
+        approvalPanel: document.getElementById('approval-panel'),
+        approvalList: document.getElementById('approval-list'),
+        participantCount: document.getElementById('participant-count'),
+        participantsList: document.getElementById('participants-list'),
+        videoGrid: document.getElementById('video-grid'),
+        btnToggleVideo: document.getElementById('btn-toggle-video'),
+        btnToggleAudio: document.getElementById('btn-toggle-audio'),
+        btnEndCall: document.getElementById('btn-end-call'),
+        sharedCanvas: document.getElementById('shared-canvas'),
+        canvasColor: document.getElementById('canvas-color'),
+        canvasSize: document.getElementById('canvas-size'),
+        btnClearCanvas: document.getElementById('btn-clear-canvas'),
+        groupChatPane: document.getElementById('group-chat-pane'),
+        privateChatPane: document.getElementById('private-chat-pane'),
+        btnGroupChatTab: document.getElementById('btn-group-chat-tab'),
+        btnPrivateChatTab: document.getElementById('btn-private-chat-tab'),
+        groupChatMessages: document.getElementById('group-chat-messages'),
+        groupChatForm: document.getElementById('group-chat-form'),
+        groupChatInput: document.getElementById('group-chat-input'),
+        privateRecipientSelect: document.getElementById('private-recipient-select'),
+        privateChatMessages: document.getElementById('private-chat-messages'),
+        privateChatForm: document.getElementById('private-chat-form'),
+        privateChatInput: document.getElementById('private-chat-input'),
+        btnSendPrivate: document.getElementById('btn-send-private'),
+        gameSelection: document.getElementById('game-selection'),
+        gameArena: document.getElementById('game-arena'),
+        gameTitle: document.getElementById('game-title'),
+        gameDisplay: document.getElementById('game-display'),
+        btnExitGame: document.getElementById('btn-exit-game'),
+        toastContainer: document.getElementById('toast-container')
+    };
+
+    // SPYFALL LOCATIONS & ROLES DATA
+    const SPYFALL_DATA = [
+        { location: 'Airplane', roles: ['Pilot', 'First Class Passenger', 'Flight Attendant', 'Co-Pilot', 'Security Guard'] },
+        { location: 'Bank', roles: ['Armored Car Driver', 'Manager', 'Consultant', 'Customer', 'Teller', 'Security Guard'] },
+        { location: 'Beach', roles: ['Lifeguard', 'Surfer', 'Ice Cream Vendor', 'Photographer', 'Sunbather'] },
+        { location: 'Hospital', roles: ['Doctor', 'Nurse', 'Patient', 'Surgeon', 'Anesthesiologist', 'Visitor'] },
+        { location: 'Movie Studio', roles: ['Stuntman', 'Director', 'Actor', 'Cameraman', 'Producer', 'Sound Tech'] },
+        { location: 'Pirate Ship', roles: ['Captain', 'Cook', 'Sailor', 'Prisoner', 'Cannoneer', 'Lookout'] }
+    ];
+
+    // TRIVIA QUESTIONS DATA
+    const TRIVIA_DATA = [
+        { q: "What is the capital of France?", options: ["Berlin", "Madrid", "Paris", "Rome"], a: 2 },
+        { q: "Which planet is known as the Red Planet?", options: ["Venus", "Mars", "Jupiter", "Saturn"], a: 1 },
+        { q: "Which element has the chemical symbol 'O'?", options: ["Gold", "Oxygen", "Osmium", "Silver"], a: 1 },
+        { q: "How many sides does a hexagon have?", options: ["5", "6", "7", "8"], a: 1 }
+    ];
+
+    // INITIALIZATION
+    function init() {
+        setupEventListeners();
+        setupCanvas();
+        showScreen('lobby-screen');
     }
-  }
-}
 
-function setupGame() {
-  const gameBoard = $("gameBoard");
-  const player = $("player");
-
-  if (!gameBoard || !player || gameBoard.dataset.ready === "true") {
-    return;
-  }
-
-  gameBoard.dataset.ready = "true";
-
-  document.addEventListener("keydown", handleGameKeydown);
-}
-
-function handleGameKeydown(event) {
-  const gameBoard = $("gameBoard");
-  const player = $("player");
-
-  if (!gameBoard || !player) return;
-
-  const key = event.key.toLowerCase();
-
-  const movementKeys = [
-    "w",
-    "a",
-    "s",
-    "d",
-    "arrowup",
-    "arrowdown",
-    "arrowleft",
-    "arrowright"
-  ];
-
-  if (!movementKeys.includes(key)) return;
-
-  if (document.activeElement?.tagName === "INPUT") return;
-
-  if (screens?.app?.classList.contains("hidden")) return;
-
-  event.preventDefault();
-
-  if (key === "w" || key === "arrowup") {
-    state.gamePosition.y = Math.max(0, state.gamePosition.y - 3);
-  }
-
-  if (key === "s" || key === "arrowdown") {
-    state.gamePosition.y = Math.min(92, state.gamePosition.y + 3);
-  }
-
-  if (key === "a" || key === "arrowleft") {
-    state.gamePosition.x = Math.max(0, state.gamePosition.x - 3);
-  }
-
-  if (key === "d" || key === "arrowright") {
-    state.gamePosition.x = Math.min(92, state.gamePosition.x + 3);
-  }
-
-  player.style.left = `${state.gamePosition.x}%`;
-  player.style.top = `${state.gamePosition.y}%`;
-
-  const payload = {
-    type: "GAME_UPDATE",
-    peerId: state.peerId,
-    x: state.gamePosition.x,
-    y: state.gamePosition.y
-  };
-
-  if (state.isHost) {
-    broadcast(payload);
-  } else {
-    sendToHost(payload);
-  }
-}
-
-function handleGameUpdate(payload, connection) {
-  updateRemoteGame(payload);
-
-  if (state.isHost && connection?.peer) {
-    broadcast(payload, connection.peer);
-  }
-}
-
-function updateRemoteGame(payload) {
-  const gameBoard = $("gameBoard");
-
-  if (!gameBoard || !payload.peerId || payload.peerId === state.peerId) {
-    return;
-  }
-
-  let remotePlayer = state.remotePlayers.get(payload.peerId);
-
-  if (!remotePlayer) {
-    remotePlayer = document.createElement("div");
-    remotePlayer.className = "remote-player";
-    remotePlayer.dataset.peer = payload.peerId;
-    gameBoard.appendChild(remotePlayer);
-    state.remotePlayers.set(payload.peerId, remotePlayer);
-  }
-
-  remotePlayer.style.left = `${payload.x}%`;
-  remotePlayer.style.top = `${payload.y}%`;
-}
-
-function removeRemotePlayer(peerId) {
-  const player = state.remotePlayers.get(peerId);
-
-  if (player) {
-    player.remove();
-  }
-
-  state.remotePlayers.delete(peerId);
-}
-
-async function copyRoomCode() {
-  if (!state.roomCode) return;
-
-  try {
-    await navigator.clipboard.writeText(state.roomCode);
-  } catch {
-    const temporaryInput = document.createElement("input");
-    temporaryInput.value = state.roomCode;
-    document.body.appendChild(temporaryInput);
-    temporaryInput.select();
-    document.execCommand("copy");
-    temporaryInput.remove();
-  }
-
-  setText("copyStatus", "Copied!");
-  showToast("Room code copied.", "success");
-
-  setTimeout(() => {
-    setText("copyStatus", "");
-  }, 2500);
-}
-
-function cancelJoinRequest() {
-  sendToHost({
-    type: "CANCEL_REQUEST"
-  });
-
-  resetToLobby();
-}
-
-function leaveRoom() {
-  if (state.isHost) {
-    broadcast({
-      type: "REJECTED"
-    });
-  }
-
-  resetToLobby();
-}
-
-async function resetConnectionOnly() {
-  stopLocalMedia();
-
-  state.calls.forEach((call) => {
-    try {
-      call.close();
-    } catch {}
-  });
-
-  state.connections.forEach((connection) => {
-    try {
-      connection.close();
-    } catch {}
-  });
-
-  try {
-    state.peer?.destroy();
-  } catch {}
-
-  state.peer = null;
-  state.peerId = null;
-  state.hostPeerId = null;
-  state.hostConnection = null;
-
-  state.connections.clear();
-  state.pendingRequests.clear();
-  state.participants.clear();
-  state.calls.clear();
-  state.remotePlayers.forEach((player) => player.remove());
-  state.remotePlayers.clear();
-
-  state.localStream = null;
-  state.cameraEnabled = false;
-  state.micEnabled = false;
-
-  updateCallButtons();
-}
-
-function stopLocalMedia() {
-  if (!state.localStream) return;
-
-  state.localStream.getTracks().forEach((track) => {
-    track.stop();
-  });
-
-  state.localStream = null;
-
-  if (localVideo) {
-    localVideo.srcObject = null;
-  }
-}
-
-function cleanupConnections() {
-  stopLocalMedia();
-
-  state.calls.forEach((call) => {
-    try {
-      call.close();
-    } catch {}
-  });
-
-  state.connections.forEach((connection) => {
-    try {
-      connection.close();
-    } catch {}
-  });
-
-  try {
-    state.peer?.destroy();
-  } catch {}
-}
-
-function resetToLobby() {
-  resetConnectionOnly();
-
-  state.roomCode = "";
-  state.username = "";
-  state.isHost = false;
-
-  state.messages = [];
-  state.privateMessages.clear();
-  state.selectedPrivateUser = null;
-  state.gamePosition = { x: 5, y: 5 };
-
-  if (messagesContainer) {
-    messagesContainer.replaceChildren();
-
-    const welcome = document.createElement("div");
-    welcome.className = "message system";
-
-    const text = document.createElement("p");
-    text.textContent = "Welcome to MINGLE. Start the conversation.";
-
-    welcome.appendChild(text);
-    messagesContainer.appendChild(welcome);
-  }
-
-  if (remoteVideos) {
-    remoteVideos.replaceChildren();
-  }
-
-  if (pendingRequests) {
-    pendingRequests.replaceChildren();
-  }
-
-  if (participantsList) {
-    participantsList.replaceChildren();
-  }
-
-  if ($("privateUsers")) {
-    $("privateUsers").replaceChildren();
-  }
-
-  setText("displayRoomCode", "------");
-  setText("currentUserName", "");
-  setText("roomTitle", "MINGLE Room");
-  setText("connectionStatus", "Disconnected");
-  setText("copyStatus", "");
-  setText("lobbyStatus", "");
-
-  if (participantCount) {
-    participantCount.textContent = "0";
-  }
-
-  if (pendingCount) {
-    pendingCount.textContent = "0";
-  }
-
-  pendingSection?.classList.add("hidden");
-
-  showScreen("lobby");
-}
+    function showScreen(screenId) {
+        document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+        document.getElementById(screenId).classList.add('active');
+    }
+
+    function showToast(msg) {
+        const toast = document.createElement('div');
+        toast.className = 'toast';
+        toast.textContent = msg;
+        el.toastContainer.appendChild(toast);
+        setTimeout(() => toast.remove(), 4000);
+    }
+
+    function showLobbyStatus(msg, isError = true) {
+        el.lobbyStatus.classList.remove('hidden');
+        el.lobbyStatus.style.color = isError ? 'var(--danger)' : 'var(--success)';
+        el.lobbyStatus.textContent = msg;
+    }
+
+    // EVENT LISTENERS
+    function setupEventListeners() {
+        el.btnCreateRoom.addEventListener('click', handleCreateRoom);
+        el.btnJoinRoom.addEventListener('click', handleJoinRoom);
+        el.btnCancelJoin.addEventListener('click', resetToLobby);
+        el.btnLeaveRoom.addEventListener('click', leaveRoom);
+        el.btnCopyCode.addEventListener('click', () => {
+            navigator.clipboard.writeText(state.roomCode);
+            showToast('Room code copied!');
+        });
+
+        // Tabs
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+                btn.classList.add('active');
+                document.getElementById(btn.dataset.tab).classList.add('active');
+                if (btn.dataset.tab === 'tab-canvas') resizeCanvas();
+            });
+        });
+
+        // Chat Tabs
+        el.btnGroupChatTab.addEventListener('click', () => {
+            el.btnGroupChatTab.classList.add('active');
+            el.btnPrivateChatTab.classList.remove('active');
+            el.groupChatPane.classList.add('active');
+            el.privateChatPane.classList.remove('active');
+        });
+
+        el.btnPrivateChatTab.addEventListener('click', () => {
+            el.btnPrivateChatTab.classList.add('active');
+            el.btnGroupChatTab.classList.remove('active');
+            el.privateChatPane.classList.add('active');
+            el.groupChatPane.classList.remove('active');
+        });
+
+        // Chat Forms
+        el.groupChatForm.addEventListener('submit', sendGroupMessage);
+        el.privateChatForm.addEventListener('submit', sendPrivateMessage);
+        el.privateRecipientSelect.addEventListener('change', handlePrivateRecipientChange);
+
+        // Media
+        el.btnToggleVideo.addEventListener('click', () => toggleMedia(true, true));
+        el.btnToggleAudio.addEventListener('click', () => toggleMedia(false, true));
+        el.btnEndCall.addEventListener('click', endMediaCall);
+
+        // Games Start
+        document.querySelectorAll('.btn-start-game').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                if (!state.isHost) {
+                    showToast('Only the host can start games!');
+                    return;
+                }
+                startGame(e.target.dataset.game);
+            });
+        });
+        el.btnExitGame.addEventListener('click', exitGame);
+    }
+
+    function generateRoomCode() {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        let code = 'MNG-';
+        for (let i = 0; i < 4; i++) code += chars.charAt(Math.floor(Math.random() * chars.length));
+        return code;
+    }
+
+    // PEERJS NETWORK LOGIC
+    function initPeer(customId = null) {
+        return new Promise((resolve, reject) => {
+            if (state.peer) state.peer.destroy();
+            
+            const peer = customId ? new Peer(customId) : new Peer();
+            
+            peer.on('open', (id) => {
+                state.peerId = id;
+                state.peer = peer;
+                resolve(peer);
+            });
+
+            peer.on('connection', (conn) => {
+                handleIncomingConnection(conn);
+            });
+
+            peer.on('call', (call) => {
+                handleIncomingCall(call);
+            });
+
+            peer.on('error', (err) => {
+                console.error('PeerJS Error:', err);
+                reject(err);
+            });
+        });
+    }
+
+    async function handleCreateRoom() {
+        const name = el.usernameInput.value.trim();
+        if (!name) return showLobbyStatus('Please enter a display name.');
+
+        state.username = name;
+        state.isHost = true;
+        state.roomCode = generateRoomCode();
+
+        try {
+            await initPeer(state.roomCode);
+            state.participants[state.peerId] = { username: state.username, isHost: true };
+            enterRoom();
+        } catch (err) {
+            showLobbyStatus('Failed to create room code. Code may be in use. Try again.');
+        }
+    }
+
+    async function handleJoinRoom() {
+        const name = el.usernameInput.value.trim();
+        const code = el.roomCodeInput.value.trim().toUpperCase();
+
+        if (!name) return showLobbyStatus('Please enter a display name.');
+        if (!code) return showLobbyStatus('Please enter a room code.');
+
+        state.username = name;
+        state.isHost = false;
+        state.roomCode = code;
+
+        showScreen('waiting-screen');
+
+        try {
+            await initPeer();
+            const conn = state.peer.connect(code, { reliable: true });
+
+            const timeout = setTimeout(() => {
+                conn.close();
+                resetToLobby();
+                showToast('Connection timed out. Host not responding.');
+            }, 10000);
+
+            conn.on('open', () => {
+                clearTimeout(timeout);
+                state.connections[code] = conn;
+                setupConnectionListeners(conn);
+                conn.send({ type: 'JOIN_REQUEST', username: state.username, peerId: state.peerId });
+            });
+
+            conn.on('error', () => {
+                clearTimeout(timeout);
+                resetToLobby();
+                showToast('Could not connect to host.');
+            });
+
+        } catch (err) {
+            resetToLobby();
+            showToast('Peer connection error.');
+        }
+    }
+
+    function handleIncomingConnection(conn) {
+        conn.on('data', (data) => {
+            if (data.type === 'JOIN_REQUEST' && state.isHost) {
+                state.pendingApprovals[conn.peer] = { username: data.username, conn: conn };
+                renderApprovals();
+                el.approvalPanel.classList.remove('hidden');
+            } else {
+                handleNetworkData(data, conn);
+            }
+        });
+
+        conn.on('close', () => {
+            handleUserDisconnect(conn.peer);
+        });
+    }
+
+    function setupConnectionListeners(conn) {
+        conn.on('data', (data) => handleNetworkData(data, conn));
+        conn.on('close', () => handleUserDisconnect(conn.peer));
+    }
+
+    function renderApprovals() {
+        el.approvalList.innerHTML = '';
+        Object.entries(state.pendingApprovals).forEach(([peerId, req]) => {
+            const div = document.createElement('div');
+            div.className = 'approval-item';
+            div.innerHTML = `
+                <span><strong>${escapeHTML(req.username)}</strong></span>
+                <div>
+                    <button class="btn btn-success btn-sm btn-approve" data-id="${peerId}"><i class="fa-solid fa-check"></i></button>
+                    <button class="btn btn-danger btn-sm btn-reject" data-id="${peerId}"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+            `;
+            el.approvalList.appendChild(div);
+        });
+
+        el.approvalList.querySelectorAll('.btn-approve').forEach(b => {
+            b.addEventListener('click', () => approveGuest(b.dataset.id));
+        });
+        el.approvalList.querySelectorAll('.btn-reject').forEach(b => {
+            b.addEventListener('click', () => rejectGuest(b.dataset.id));
+        });
+    }
+
+    function approveGuest(peerId) {
+        const req = state.pendingApprovals[peerId];
+        if (!req) return;
+
+        state.connections[peerId] = req.conn;
+        state.participants[peerId] = { username: req.username, isHost: false };
+        delete state.pendingApprovals[peerId];
+
+        if (Object.keys(state.pendingApprovals).length === 0) {
+            el.approvalPanel.classList.add('hidden');
+        } else {
+            renderApprovals();
+        }
+
+        // Notify new user
+        req.conn.send({
+            type: 'JOIN_APPROVED',
+            participants: state.participants,
+            roomCode: state.roomCode
+        });
+
+        // Broadcast new user to all existing guests
+        broadcast({
+            type: 'PARTICIPANT_JOINED',
+            peerId: peerId,
+            username: req.username
+        }, peerId);
+
+        updateParticipantsUI();
+        addSystemMessage(`${req.username} joined the room.`);
+    }
+
+    function rejectGuest(peerId) {
+        const req = state.pendingApprovals[peerId];
+        if (req) {
+            req.conn.send({ type: 'JOIN_REJECTED', reason: 'Host rejected your request.' });
+            delete state.pendingApprovals[peerId];
+            if (Object.keys(state.pendingApprovals).length === 0) el.approvalPanel.classList.add('hidden');
+            renderApprovals();
+        }
+    }
+
+    function handleNetworkData(data, conn) {
+        switch (data.type) {
+            case 'JOIN_APPROVED':
+                state.participants = data.participants;
+                enterRoom();
+                showToast('Welcome to the room!');
+                break;
+
+            case 'JOIN_REJECTED':
+                resetToLobby();
+                showToast(data.reason || 'Join request rejected.');
+                break;
+
+            case 'PARTICIPANT_JOINED':
+                state.participants[data.peerId] = { username: data.username, isHost: false };
+                updateParticipantsUI();
+                addSystemMessage(`${data.username} joined the room.`);
+                break;
+
+            case 'PARTICIPANT_LEFT':
+                handleUserDisconnect(data.peerId);
+                break;
+
+            case 'CHAT_GROUP':
+                appendGroupMessage(data.senderName, data.text, data.timestamp, false);
+                if (state.isHost) broadcast(data, conn.peer);
+                break;
+
+            case 'CHAT_PRIVATE':
+                if (data.receiverPeerId === state.peerId) {
+                    storeAndRenderPrivateMessage(data.senderPeerId, data.senderName, data.text, data.timestamp, false);
+                    showToast(`Private message from ${data.senderName}`);
+                } else if (state.isHost) {
+                    // Host acts as relay fallback if peers are not directly connected
+                    if (state.connections[data.receiverPeerId]) {
+                        state.connections[data.receiverPeerId].send(data);
+                    }
+                }
+                break;
+
+            case 'CANVAS_DRAW':
+                drawOnCanvas(data.prevX, data.prevY, data.currX, data.currY, data.color, data.size, false);
+                if (state.isHost) broadcast(data, conn.peer);
+                break;
+
+            case 'CANVAS_CLEAR':
+                clearCanvas(false);
+                if (state.isHost) broadcast(data, conn.peer);
+                break;
+
+            case 'GAME_STATE_UPDATE':
+                state.gameState = data.gameState;
+                renderGameUI();
+                if (state.isHost) broadcast(data, conn.peer);
+                break;
+        }
+    }
+
+    function broadcast(data, excludePeerId = null) {
+        Object.keys(state.connections).forEach(peerId => {
+            if (peerId !== excludePeerId) {
+                state.connections[peerId].send(data);
+            }
+        });
+    }
+
+    function handleUserDisconnect(peerId) {
+        if (state.participants[peerId]) {
+            const name = state.participants[peerId].username;
+            delete state.participants[peerId];
+            delete state.connections[peerId];
+            if (state.mediaCalls[peerId]) state.mediaCalls[peerId].close();
+            delete state.mediaCalls[peerId];
+            
+            const videoElem = document.getElementById(`video-${peerId}`);
+            if (videoElem) videoElem.remove();
+
+            updateParticipantsUI();
+            addSystemMessage(`${name} left the room.`);
+
+            if (state.isHost) {
+                broadcast({ type: 'PARTICIPANT_LEFT', peerId: peerId });
+            }
+        }
+    }
+
+    function leaveRoom() {
+        if (state.localStream) {
+            state.localStream.getTracks().forEach(track => track.stop());
+        }
+        if (state.peer) state.peer.destroy();
+        resetToLobby();
+    }
+
+    function resetToLobby() {
+        state.peer = null;
+        state.peerId = null;
+        state.connections = {};
+        state.participants = {};
+        state.pendingApprovals = {};
+        state.isHost = false;
+        state.roomCode = null;
+        showScreen('lobby-screen');
+    }
+
+    function enterRoom() {
+        el.displayRoomCode.textContent = state.roomCode;
+        updateParticipantsUI();
+        showScreen('room-screen');
+        resizeCanvas();
+    }
+
+    function updateParticipantsUI() {
+        el.participantCount.textContent = Object.keys(state.participants).length;
+        el.participantsList.innerHTML = '';
+        el.privateRecipientSelect.innerHTML = '<option value="">-- Select Participant --</option>';
+
+        Object.entries(state.participants).forEach(([id, p]) => {
+            const card = document.createElement('div');
+            card.className = `participant-card ${p.isHost ? 'is-host' : ''}`;
+            card.innerHTML = `<i class="fa-solid fa-user"></i> <span>${escapeHTML(p.username)}</span>`;
+            el.participantsList.appendChild(card);
+
+            if (id !== state.peerId) {
+                const opt = document.createElement('option');
+                opt.value = id;
+                opt.textContent = p.username;
+                el.privateRecipientSelect.appendChild(opt);
+            }
+        });
+    }
+
+    // CHAT MODULE
+    function sendGroupMessage(e) {
+        e.preventDefault();
+        const text = el.groupChatInput.value.trim();
+        if (!text) return;
+
+        const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        appendGroupMessage(state.username, text, timestamp, true);
+
+        const msgData = {
+            type: 'CHAT_GROUP',
+            senderName: state.username,
+            text: text,
+            timestamp: timestamp
+        };
+
+        if (state.isHost) {
+            broadcast(msgData);
+        } else {
+            const hostConn = state.connections[state.roomCode];
+            if (hostConn) hostConn.send(msgData);
+        }
+
+        el.groupChatInput.value = '';
+    }
+
+    function appendGroupMessage(sender, text, timestamp, isSelf) {
+        const div = document.createElement('div');
+        div.className = `message-item ${isSelf ? 'self' : 'other'}`;
+        div.innerHTML = `
+            <div class="message-meta">${escapeHTML(sender)} • ${timestamp}</div>
+            <div class="message-body">${escapeHTML(text)}</div>
+        `;
+        el.groupChatMessages.appendChild(div);
+        el.groupChatMessages.scrollTop = el.groupChatMessages.scrollHeight;
+    }
+
+    function addSystemMessage(text) {
+        const div = document.createElement('div');
+        div.className = 'message-item system';
+        div.textContent = text;
+        el.groupChatMessages.appendChild(div);
+        el.groupChatMessages.scrollTop = el.groupChatMessages.scrollHeight;
+    }
+
+    function handlePrivateRecipientChange() {
+        state.selectedPrivatePeerId = el.privateRecipientSelect.value;
+        const active = !!state.selectedPrivatePeerId;
+        el.privateChatInput.disabled = !active;
+        el.btnSendPrivate.disabled = !active;
+        renderPrivateChatHistory();
+    }
+
+    function sendPrivateMessage(e) {
+        e.preventDefault();
+        const recipientId = state.selectedPrivatePeerId;
+        const text = el.privateChatInput.value.trim();
+        if (!recipientId || !text) return;
+
+        const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        storeAndRenderPrivateMessage(recipientId, 'You', text, timestamp, true);
+
+        const msgData = {
+            type: 'CHAT_PRIVATE',
+            senderPeerId: state.peerId,
+            receiverPeerId: recipientId,
+            senderName: state.username,
+            text: text,
+            timestamp: timestamp
+        };
+
+        // Send directly if connected, otherwise via Host relay
+        if (state.connections[recipientId]) {
+            state.connections[recipientId].send(msgData);
+        } else if (state.connections[state.roomCode]) {
+            state.connections[state.roomCode].send(msgData);
+        }
+
+        el.privateChatInput.value = '';
+    }
+
+    function storeAndRenderPrivateMessage(peerId, senderName, text, timestamp, isSelf) {
+        if (!state.privateMessages[peerId]) state.privateMessages[peerId] = [];
+        state.privateMessages[peerId].push({ senderName, text, timestamp, isSelf });
+
+        if (state.selectedPrivatePeerId === peerId) {
+            renderPrivateChatHistory();
+        }
+    }
+
+    function renderPrivateChatHistory() {
+        el.privateChatMessages.innerHTML = '';
+        const list = state.privateMessages[state.selectedPrivatePeerId] || [];
+        list.forEach(msg => {
+            const div = document.createElement('div');
+            div.className = `message-item ${msg.isSelf ? 'self' : 'other'}`;
+            div.innerHTML = `
+                <div class="message-meta">${escapeHTML(msg.senderName)} • ${msg.timestamp}</div>
+                <div class="message-body">${escapeHTML(msg.text)}</div>
+            `;
+            el.privateChatMessages.appendChild(div);
+        });
+        el.privateChatMessages.scrollTop = el.privateChatMessages.scrollHeight;
+    }
+
+    // MEDIA MODULE (VIDEO & AUDIO)
+    async function toggleMedia(video = true, audio = true) {
+        if (state.localStream) return; // Calls already active
+
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: video, audio: audio });
+            state.localStream = stream;
+            addVideoTrack(state.peerId, state.username, stream, true);
+            el.btnEndCall.classList.remove('hidden');
+
+            // Call all existing connected peers
+            Object.keys(state.participants).forEach(peerId => {
+                if (peerId !== state.peerId) {
+                    const call = state.peer.call(peerId, stream);
+                    setupCall(call, peerId);
+                }
+            });
+        } catch (err) {
+            showToast('Microphone/Camera permission denied or unavailable.');
+        }
+    }
+
+    function handleIncomingCall(call) {
+        if (!state.localStream) {
+            // Auto answer audio-only if user didn't start stream yet, or reject answerless
+            navigator.mediaDevices.getUserMedia({ video: false, audio: true }).then(stream => {
+                state.localStream = stream;
+                call.answer(stream);
+                setupCall(call, call.peer);
+            }).catch(() => {
+                call.answer(); // Answer without local stream
+                setupCall(call, call.peer);
+            });
+        } else {
+            call.answer(state.localStream);
+            setupCall(call, call.peer);
+        }
+    }
+
+    function setupCall(call, remotePeerId) {
+        state.mediaCalls[remotePeerId] = call;
+        call.on('stream', (remoteStream) => {
+            const username = state.participants[remotePeerId] ? state.participants[remotePeerId].username : 'Participant';
+            addVideoTrack(remotePeerId, username, remoteStream, false);
+        });
+        call.on('close', () => {
+            const videoElem = document.getElementById(`video-${remotePeerId}`);
+            if (videoElem) videoElem.remove();
+        });
+    }
+
+    function addVideoTrack(peerId, name, stream, isSelf) {
+        let card = document.getElementById(`video-${peerId}`);
+        if (!card) {
+            card = document.createElement('div');
+            card.id = `video-${peerId}`;
+            card.className = 'video-card';
+            card.innerHTML = `<video autoplay playsinline ${isSelf ? 'muted' : ''}></video><div class="name-tag">${escapeHTML(name)}</div>`;
+            el.videoGrid.appendChild(card);
+        }
+        const video = card.querySelector('video');
+        video.srcObject = stream;
+    }
+
+    function endMediaCall() {
+        if (state.localStream) {
+            state.localStream.getTracks().forEach(track => track.stop());
+            state.localStream = null;
+        }
+        Object.values(state.mediaCalls).forEach(call => call.close());
+        state.mediaCalls = {};
+        el.videoGrid.innerHTML = '';
+        el.btnEndCall.classList.add('hidden');
+    }
+
+    // CANVAS MODULE
+    function setupCanvas() {
+        state.canvasCtx = el.sharedCanvas.getContext('2d');
+        let prevX = 0, prevY = 0;
+
+        function getPos(e) {
+            const rect = el.sharedCanvas.getBoundingClientRect();
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            return {
+                x: clientX - rect.left,
+                y: clientY - rect.top
+            };
+        }
+
+        const startDraw = (e) => {
+            state.isDrawing = true;
+            const pos = getPos(e);
+            prevX = pos.x;
+            prevY = pos.y;
+        };
+
+        const draw = (e) => {
+            if (!state.isDrawing) return;
+            const pos = getPos(e);
+            const color = el.canvasColor.value;
+            const size = el.canvasSize.value;
+
+            drawOnCanvas(prevX, prevY, pos.x, pos.y, color, size, true);
+
+            const strokeData = { type: 'CANVAS_DRAW', prevX, prevY, currX: pos.x, currY: pos.y, color, size };
+            if (state.isHost) broadcast(strokeData);
+            else if (state.connections[state.roomCode]) state.connections[state.roomCode].send(strokeData);
+
+            prevX = pos.x;
+            prevY = pos.y;
+        };
+
+        const stopDraw = () => state.isDrawing = false;
+
+        el.sharedCanvas.addEventListener('mousedown', startDraw);
+        el.sharedCanvas.addEventListener('mousemove', draw);
+        el.sharedCanvas.addEventListener('mouseup', stopDraw);
+        el.sharedCanvas.addEventListener('mouseleave', stopDraw);
+
+        el.sharedCanvas.addEventListener('touchstart', startDraw);
+        el.sharedCanvas.addEventListener('touchmove', draw);
+        el.sharedCanvas.addEventListener('touchend', stopDraw);
+
+        el.btnClearCanvas.addEventListener('click', () => {
+            clearCanvas(true);
+            const clearData = { type: 'CANVAS_CLEAR' };
+            if (state.isHost) broadcast(clearData);
+            else if (state.connections[state.roomCode]) state.connections[state.roomCode].send(clearData);
+        });
+    }
+
+    function resizeCanvas() {
+        const wrapper = el.sharedCanvas.parentElement;
+        el.sharedCanvas.width = wrapper.clientWidth;
+        el.sharedCanvas.height = wrapper.clientHeight;
+    }
+
+    function drawOnCanvas(pX, pY, cX, cY, color, size, isLocal) {
+        state.canvasCtx.beginPath();
+        state.canvasCtx.moveTo(pX, pY);
+        state.canvasCtx.lineTo(cX, cY);
+        state.canvasCtx.strokeStyle = color;
+        state.canvasCtx.lineWidth = size;
+        state.canvasCtx.lineCap = 'round';
+        state.canvasCtx.stroke();
+        state.canvasCtx.closePath();
+    }
+
+    function clearCanvas(isLocal) {
+        state.canvasCtx.clearRect(0, 0, el.sharedCanvas.width, el.sharedCanvas.height);
+    }
+
+    // GAMES ENGINE MODULE
+    function startGame(gameType) {
+        state.gameState.activeGame = gameType;
+
+        if (gameType === 'spyfall') {
+            const locObj = SPYFALL_DATA[Math.floor(Math.random() * SPYFALL_DATA.length)];
+            const participantKeys = Object.keys(state.participants);
+            const spyPeerId = participantKeys[Math.floor(Math.random() * participantKeys.length)];
+
+            state.gameState.data = {
+                location: locObj.location,
+                roles: locObj.roles,
+                spyPeerId: spyPeerId
+            };
+        } else if (gameType === 'trivia' || gameType === 'music') {
+            state.gameState.data = {
+                questionIndex: 0,
+                scores: {}
+            };
+            Object.keys(state.participants).forEach(id => state.gameState.data.scores[id] = 0);
+        }
+
+        syncGameState();
+    }
+
+    function exitGame() {
+        state.gameState = { activeGame: null, data: {} };
+        syncGameState();
+    }
+
+    function syncGameState() {
+        renderGameUI();
+        if (state.isHost) {
+            broadcast({ type: 'GAME_STATE_UPDATE', gameState: state.gameState });
+        }
+    }
+
+    function renderGameUI() {
+        if (!state.gameState.activeGame) {
+            el.gameSelection.classList.remove('hidden');
+            el.gameArena.classList.add('hidden');
+            return;
+        }
+
+        el.gameSelection.classList.add('hidden');
+        el.gameArena.classList.remove('hidden');
+        el.btnExitGame.classList.toggle('hidden', !state.isHost);
+
+        if (state.gameState.activeGame === 'spyfall') {
+            el.gameTitle.textContent = 'Spyfall';
+            const isSpy = state.gameState.data.spyPeerId === state.peerId;
+            const secretRole = state.gameState.data.roles[Math.floor(Math.random() * state.gameState.data.roles.length)];
+
+            el.gameDisplay.innerHTML = `
+                <div style="text-align: center; padding: 20px;">
+                    <h3>Your Secret Identity:</h3>
+                    <div style="font-size: 24px; color: var(--accent); margin: 15px 0;">
+                        ${isSpy ? '🕵️ YOU ARE THE SPY!' : `📍 Location: ${state.gameState.data.location}`}
+                    </div>
+                    <p style="color: var(--text-muted);">
+                        ${isSpy ? 'Try to guess the location without revealing yourself!' : `Your Role: ${secretRole}`}
+                    </p>
+                </div>
+            `;
+        } else if (state.gameState.activeGame === 'trivia') {
+            el.gameTitle.textContent = 'Trivia Quiz';
+            const currentQ = TRIVIA_DATA[state.gameState.data.questionIndex || 0];
+
+            el.gameDisplay.innerHTML = `
+                <div style="padding: 10px;">
+                    <h3>${escapeHTML(currentQ.q)}</h3>
+                    <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 15px;">
+                        ${currentQ.options.map((opt, idx) => `
+                            <button class="btn btn-secondary btn-answer" data-idx="${idx}">${escapeHTML(opt)}</button>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+
+            el.gameDisplay.querySelectorAll('.btn-answer').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const selected = parseInt(e.target.dataset.idx);
+                    if (selected === currentQ.a) showToast('Correct!');
+                    else showToast('Wrong Answer!');
+                });
+            });
+        } else if (state.gameState.activeGame === 'music') {
+            el.gameTitle.textContent = 'Music Guesser';
+            el.gameDisplay.innerHTML = `
+                <div style="padding: 10px; text-align: center;">
+                    <h3>Guess the song from the lyrics snippet:</h3>
+                    <p style="font-style: italic; margin: 15px 0; color: var(--accent);">
+                        "Is this the real life? Is this just fantasy? Caught in a landslide..."
+                    </p>
+                    <input type="text" id="music-guess-input" placeholder="Type your guess here..." style="margin-bottom: 10px;">
+                    <button id="btn-submit-music" class="btn btn-primary btn-block">Submit Guess</button>
+                </div>
+            `;
+            document.getElementById('btn-submit-music')?.addEventListener('click', () => {
+                const val = document.getElementById('music-guess-input').value.trim().toLowerCase();
+                if (val.includes('bohemian rhapsody')) showToast('Correct Guess!');
+                else showToast('Incorrect, try again!');
+            });
+        }
+    }
+
+    // HELPER UTILS
+    function escapeHTML(str) {
+        return String(str).replace(/[&<>"']/g, function (m) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m];
+        });
+    }
+
+    // RUN APP
+    document.addEventListener('DOMContentLoaded', init);
+})();
