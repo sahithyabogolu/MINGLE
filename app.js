@@ -5,6 +5,7 @@ const state = {
   peerId: null,
   hostPeerId: null,
   hostConnection: null,
+
   roomCode: "",
   username: "",
   isHost: false,
@@ -12,9 +13,12 @@ const state = {
   connections: new Map(),
   pendingRequests: new Map(),
   participants: new Map(),
-  messages: [],
-  calls: new Map(),
 
+  messages: [],
+  privateMessages: new Map(),
+  selectedPrivateUser: null,
+
+  calls: new Map(),
   localStream: null,
   cameraEnabled: false,
   micEnabled: false,
@@ -24,7 +28,9 @@ const state = {
   drawing: false,
 
   gamePosition: { x: 5, y: 5 },
-  remotePlayers: new Map()
+  remotePlayers: new Map(),
+
+  initialized: false
 };
 
 const $ = (id) => document.getElementById(id);
@@ -61,11 +67,18 @@ const PEER_CONFIG = {
   }
 };
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", initializeApp);
+
+function initializeApp() {
+  if (state.initialized) return;
+
+  state.initialized = true;
+
   initializeDOM();
   bindButtons();
   setupTabs();
-});
+  updateCallButtons();
+}
 
 function initializeDOM() {
   screens = {
@@ -115,48 +128,62 @@ function bindButtons() {
       .toUpperCase()
       .replace(/[^A-Z0-9]/g, "");
   });
+
+  window.addEventListener("beforeunload", cleanupConnections);
 }
 
-function getRoomPeerId(code) {
-  return `mingle-room-${code}`;
+function getRoomPeerId(roomCode) {
+  return `mingle-room-${roomCode}`;
 }
 
 function generateRoomCode() {
   const characters = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
 
-  for (let i = 0; i < 6; i++) {
+  for (let index = 0; index < 6; index += 1) {
     code += characters[Math.floor(Math.random() * characters.length)];
   }
 
   return code;
 }
 
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+function normalizeName(name) {
+  return String(name || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 24);
+}
+
+function normalizeRoomCode(code) {
+  return String(code || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "")
+    .slice(0, 8);
 }
 
 function showScreen(name) {
-  Object.values(screens).forEach((screen) => {
+  Object.values(screens || {}).forEach((screen) => {
     screen?.classList.add("hidden");
   });
 
-  screens[name]?.classList.remove("hidden");
+  screens?.[name]?.classList.remove("hidden");
 }
 
-function setStatus(text) {
+function setStatus(message) {
   const element = $("lobbyStatus");
-  if (element) element.textContent = text;
+
+  if (element) {
+    element.textContent = message;
+  }
 }
 
 function setText(id, text) {
   const element = $(id);
-  if (element) element.textContent = text;
+
+  if (element) {
+    element.textContent = text;
+  }
 }
 
 function showToast(message, type = "info") {
@@ -179,7 +206,7 @@ function createPeer(peerId = null) {
       return;
     }
 
-    let completed = false;
+    let settled = false;
 
     try {
       state.peer = peerId
@@ -191,27 +218,30 @@ function createPeer(peerId = null) {
     }
 
     const timeout = setTimeout(() => {
-      if (!completed) {
-        completed = true;
-        reject(new Error("PeerJS timed out."));
-      }
+      if (settled) return;
+
+      settled = true;
+      reject(new Error("PeerJS connection timed out."));
     }, 20000);
 
     state.peer.on("open", (id) => {
       state.peerId = id;
 
-      if (!completed) {
-        completed = true;
+      if (!settled) {
+        settled = true;
         clearTimeout(timeout);
         resolve(id);
       }
     });
 
-    state.peer.on("connection", setupConnection);
+    state.peer.on("connection", (connection) => {
+      setupConnection(connection);
+    });
+
     state.peer.on("call", handleIncomingCall);
 
     state.peer.on("disconnected", () => {
-      if (!state.peer.destroyed) {
+      if (state.peer && !state.peer.destroyed) {
         state.peer.reconnect();
       }
     });
@@ -219,26 +249,45 @@ function createPeer(peerId = null) {
     state.peer.on("error", (error) => {
       console.error("PeerJS error:", error);
 
-      if (!completed) {
-        completed = true;
+      if (!settled) {
+        settled = true;
         clearTimeout(timeout);
         reject(error);
         return;
       }
 
       if (error.type === "unavailable-id") {
-        showToast("That room code is already in use.", "error");
+        showToast(
+          "That room code is already in use. Create another room.",
+          "error"
+        );
       } else if (error.type === "peer-unavailable") {
-        showToast("Room not found or host is offline.", "error");
+        showToast(
+          "Room not found or host is offline.",
+          "error"
+        );
       } else {
-        showToast("Network connection problem.", "error");
+        showToast(
+          "Network connection problem. Please try again.",
+          "error"
+        );
       }
     });
   });
 }
 
 function setupConnection(connection) {
-  if (!connection) return;
+  if (!connection || !connection.peer) return;
+
+  const existingConnection = state.connections.get(connection.peer);
+
+  if (existingConnection && existingConnection !== connection) {
+    try {
+      existingConnection.close();
+    } catch {}
+
+    state.connections.delete(connection.peer);
+  }
 
   state.connections.set(connection.peer, connection);
 
@@ -251,35 +300,44 @@ function setupConnection(connection) {
   });
 
   connection.on("close", () => {
-    state.connections.delete(connection.peer);
-    state.pendingRequests.delete(connection.peer);
-    state.calls.delete(connection.peer);
-
-    removeParticipant(connection.peer);
-    removeRemoteVideo(connection.peer);
-
-    if (state.isHost) {
-      broadcastParticipants();
-      renderPendingRequests();
-    } else if (connection.peer === state.hostPeerId) {
-      showToast("The host left the room.", "error");
-      resetToLobby();
-    }
+    handleConnectionClosed(connection.peer);
   });
 
   connection.on("error", (error) => {
-    console.error("Connection error:", error);
+    console.error("Data connection error:", error);
   });
 }
 
+function handleConnectionClosed(peerId) {
+  state.connections.delete(peerId);
+  state.pendingRequests.delete(peerId);
+  state.calls.delete(peerId);
+
+  removeParticipant(peerId);
+  removeRemoteVideo(peerId);
+  removeRemotePlayer(peerId);
+
+  if (state.isHost) {
+    broadcastParticipants();
+    renderPendingRequests();
+  }
+
+  if (!state.isHost && peerId === state.hostPeerId) {
+    showToast("The host left the room.", "error");
+    resetToLobby();
+  }
+}
+
 function sendConnection(connection, payload) {
-  if (!connection || !connection.open) return false;
+  if (!connection || !connection.open) {
+    return false;
+  }
 
   try {
     connection.send(payload);
     return true;
   } catch (error) {
-    console.error(error);
+    console.error("Send error:", error);
     return false;
   }
 }
@@ -293,27 +351,23 @@ function broadcast(payload, exceptPeerId = null) {
 }
 
 function sendToHost(payload) {
-  sendConnection(state.hostConnection, payload);
+  if (state.isHost) {
+    handlePayload(payload, {
+      peer: state.peerId
+    });
+
+    return true;
+  }
+
+  return sendConnection(state.hostConnection, payload);
 }
 
 function handlePayload(payload, connection) {
-  if (!payload?.type) return;
+  if (!payload || !payload.type) return;
 
   switch (payload.type) {
     case "JOIN_REQUEST":
-      if (state.isHost) {
-        state.pendingRequests.set(connection.peer, {
-          username: payload.username,
-          connection
-        });
-
-        renderPendingRequests();
-
-        showToast(
-          `${payload.username} requested to join.`,
-          "success"
-        );
-      }
+      handleJoinRequest(payload, connection);
       break;
 
     case "JOIN_RESPONSE":
@@ -321,21 +375,15 @@ function handlePayload(payload, connection) {
       break;
 
     case "PARTICIPANTS_UPDATE":
-      state.participants.clear();
-
-      (payload.participants || []).forEach((participant) => {
-        state.participants.set(participant.id, participant);
-      });
-
-      renderParticipants();
+      handleParticipantsUpdate(payload);
       break;
 
     case "CHAT_MESSAGE":
-      receiveChatMessage(payload.message);
+      handleChatMessage(payload, connection);
+      break;
 
-      if (state.isHost) {
-        broadcast(payload, connection.peer);
-      }
+    case "PRIVATE_MESSAGE":
+      handlePrivateMessage(payload);
       break;
 
     case "REJECTED":
@@ -356,23 +404,100 @@ function handlePayload(payload, connection) {
       handleCanvasPayload(payload, connection);
       break;
 
-    case "GAME_UPDATE":
-      updateRemoteGame(payload);
+    case "CANVAS_CLEAR":
+      clearCanvas(false);
 
       if (state.isHost) {
         broadcast(payload, connection.peer);
       }
       break;
+
+    case "GAME_UPDATE":
+      handleGameUpdate(payload, connection);
+      break;
+
+    default:
+      console.warn("Unknown payload:", payload.type);
   }
 }
 
+function handleJoinRequest(payload, connection) {
+  if (!state.isHost || !connection) return;
+
+  const username = normalizeName(payload.username);
+
+  if (!username) {
+    sendConnection(connection, {
+      type: "JOIN_RESPONSE",
+      approved: false
+    });
+
+    return;
+  }
+
+  state.pendingRequests.set(connection.peer, {
+    username,
+    connection
+  });
+
+  renderPendingRequests();
+
+  showToast(`${username} requested to join.`, "success");
+}
+
+function handleParticipantsUpdate(payload) {
+  if (!Array.isArray(payload.participants)) return;
+
+  state.participants.clear();
+
+  payload.participants.forEach((participant) => {
+    if (!participant?.id || !participant?.name) return;
+
+    state.participants.set(participant.id, {
+      id: participant.id,
+      name: participant.name,
+      isHost: Boolean(participant.isHost)
+    });
+  });
+
+  renderParticipants();
+}
+
+function handleChatMessage(payload, connection) {
+  if (!payload.message) return;
+
+  receiveChatMessage(payload.message);
+
+  if (state.isHost && connection?.peer) {
+    broadcast(payload, connection.peer);
+  }
+}
+
+function handlePrivateMessage(payload) {
+  const message = payload.message;
+
+  if (!message) return;
+
+  if (
+    message.receiverPeerId !== state.peerId &&
+    message.senderPeerId !== state.peerId
+  ) {
+    return;
+  }
+
+  receivePrivateMessage(message);
+}
+
 async function createRoom() {
-  const username = usernameInput?.value.trim();
+  const username = normalizeName(usernameInput?.value);
 
   if (!username) {
     showToast("Please enter your name.", "error");
+    usernameInput?.focus();
     return;
   }
+
+  await resetConnectionOnly();
 
   state.username = username;
   state.roomCode = generateRoomCode();
@@ -392,29 +517,34 @@ async function createRoom() {
       "success"
     );
   } catch (error) {
-    console.error(error);
-    resetToLobby();
+    console.error("Create room error:", error);
+    await resetConnectionOnly();
+    setStatus("Could not create room. Please try again.");
     showToast("Could not create room.", "error");
   }
 }
 
 async function joinRoom() {
-  const username = usernameInput?.value.trim();
-  const code = roomCodeInput?.value.trim().toUpperCase();
+  const username = normalizeName(usernameInput?.value);
+  const roomCode = normalizeRoomCode(roomCodeInput?.value);
 
   if (!username) {
     showToast("Please enter your name.", "error");
+    usernameInput?.focus();
     return;
   }
 
-  if (!code) {
+  if (!roomCode) {
     showToast("Please enter a room code.", "error");
+    roomCodeInput?.focus();
     return;
   }
+
+  await resetConnectionOnly();
 
   state.username = username;
-  state.roomCode = code;
-  state.hostPeerId = getRoomPeerId(code);
+  state.roomCode = roomCode;
+  state.hostPeerId = getRoomPeerId(roomCode);
   state.isHost = false;
 
   setStatus("Connecting to host...");
@@ -432,7 +562,10 @@ async function joinRoom() {
 
     const timeout = setTimeout(() => {
       if (!connection.open) {
-        connection.close();
+        try {
+          connection.close();
+        } catch {}
+
         resetToLobby();
         showToast("Host is unreachable.", "error");
       }
@@ -455,8 +588,9 @@ async function joinRoom() {
       showScreen("waiting");
     });
   } catch (error) {
-    console.error(error);
-    resetToLobby();
+    console.error("Join room error:", error);
+    await resetConnectionOnly();
+    setStatus("Room not found or host is offline.");
     showToast("Room not found or host is offline.", "error");
   }
 }
@@ -474,7 +608,10 @@ function handleJoinResponse(payload) {
     state.participants.set(participant.id, participant);
   });
 
-  addParticipant(state.peerId, state.username, false);
+  if (!state.participants.has(state.peerId)) {
+    addParticipant(state.peerId, state.username, false);
+  }
+
   enterRoom();
 
   showToast("Welcome to MINGLE!", "success");
@@ -492,6 +629,7 @@ function enterRoom() {
   renderPendingRequests();
   setupCanvas();
   setupGame();
+  updateCallButtons();
 
   if (state.isHost) {
     pendingSection?.classList.remove("hidden");
@@ -501,27 +639,32 @@ function enterRoom() {
 }
 
 function admitGuest(peerId) {
+  if (!state.isHost) return;
+
   const request = state.pendingRequests.get(peerId);
 
-  if (!state.isHost || !request) return;
+  if (!request) return;
 
   addParticipant(peerId, request.username, false);
 
-  sendConnection(request.connection, {
+  const approved = sendConnection(request.connection, {
     type: "JOIN_RESPONSE",
     approved: true,
     participants: [...state.participants.values()]
   });
 
+  if (!approved) {
+    removeParticipant(peerId);
+    showToast("Could not admit that participant.", "error");
+    return;
+  }
+
   state.pendingRequests.delete(peerId);
+
   broadcastParticipants();
   renderPendingRequests();
 
   showToast(`${request.username} admitted.`, "success");
-
-  if (state.localStream) {
-    startCall(peerId);
-  }
 }
 
 function rejectGuest(peerId) {
@@ -537,13 +680,17 @@ function rejectGuest(peerId) {
   state.pendingRequests.delete(peerId);
   renderPendingRequests();
 
-  setTimeout(() => request.connection.close(), 300);
+  setTimeout(() => {
+    try {
+      request.connection.close();
+    } catch {}
+  }, 300);
 }
 
 function renderPendingRequests() {
   if (!pendingRequests) return;
 
-  pendingRequests.innerHTML = "";
+  pendingRequests.replaceChildren();
 
   if (pendingCount) {
     pendingCount.textContent = state.pendingRequests.size;
@@ -557,8 +704,10 @@ function renderPendingRequests() {
   pendingSection?.classList.remove("hidden");
 
   if (state.pendingRequests.size === 0) {
-    pendingRequests.innerHTML =
-      '<p class="empty-state">No pending requests</p>';
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "No pending requests";
+    pendingRequests.appendChild(empty);
     return;
   }
 
@@ -566,32 +715,40 @@ function renderPendingRequests() {
     const card = document.createElement("div");
     card.className = "pending-card";
 
-    card.innerHTML = `
-      <strong>${escapeHtml(request.username)}</strong>
-      <small>Wants to join your room</small>
-      <div class="pending-actions">
-        <button class="admit-btn" type="button">Admit</button>
-        <button class="reject-btn" type="button">Reject</button>
-      </div>
-    `;
+    const name = document.createElement("strong");
+    name.textContent = request.username;
 
-    card.querySelector(".admit-btn").onclick = () => {
-      admitGuest(peerId);
-    };
+    const description = document.createElement("small");
+    description.textContent = "Wants to join your room";
 
-    card.querySelector(".reject-btn").onclick = () => {
-      rejectGuest(peerId);
-    };
+    const actions = document.createElement("div");
+    actions.className = "pending-actions";
 
+    const admitButton = document.createElement("button");
+    admitButton.className = "admit-btn";
+    admitButton.type = "button";
+    admitButton.textContent = "Admit";
+    admitButton.addEventListener("click", () => admitGuest(peerId));
+
+    const rejectButton = document.createElement("button");
+    rejectButton.className = "reject-btn";
+    rejectButton.type = "button";
+    rejectButton.textContent = "Reject";
+    rejectButton.addEventListener("click", () => rejectGuest(peerId));
+
+    actions.append(admitButton, rejectButton);
+    card.append(name, description, actions);
     pendingRequests.appendChild(card);
   });
 }
 
 function addParticipant(id, name, isHost = false) {
+  if (!id || !name) return;
+
   state.participants.set(id, {
     id,
     name,
-    isHost
+    isHost: Boolean(isHost)
   });
 
   renderParticipants();
@@ -605,22 +762,27 @@ function removeParticipant(id) {
 function renderParticipants() {
   if (!participantsList) return;
 
-  participantsList.innerHTML = "";
+  participantsList.replaceChildren();
 
   state.participants.forEach((participant) => {
     const item = document.createElement("div");
     item.className = "participant";
 
-    item.innerHTML = `
-      <span class="avatar">
-        ${escapeHtml(participant.name?.charAt(0)?.toUpperCase() || "?")}
-      </span>
-      <div>
-        <strong>${escapeHtml(participant.name)}</strong>
-        <small>${participant.isHost ? "Host" : "Participant"}</small>
-      </div>
-    `;
+    const avatar = document.createElement("span");
+    avatar.className = "avatar";
+    avatar.textContent =
+      participant.name?.charAt(0)?.toUpperCase() || "?";
 
+    const details = document.createElement("div");
+
+    const name = document.createElement("strong");
+    name.textContent = participant.name;
+
+    const role = document.createElement("small");
+    role.textContent = participant.isHost ? "Host" : "Participant";
+
+    details.append(name, role);
+    item.append(avatar, details);
     participantsList.appendChild(item);
   });
 
@@ -632,6 +794,8 @@ function renderParticipants() {
 }
 
 function broadcastParticipants() {
+  if (!state.isHost) return;
+
   broadcast({
     type: "PARTICIPANTS_UPDATE",
     participants: [...state.participants.values()]
@@ -641,8 +805,8 @@ function broadcastParticipants() {
 function setupTabs() {
   document.querySelectorAll(".tab").forEach((button) => {
     button.addEventListener("click", () => {
-      document.querySelectorAll(".tab").forEach((item) => {
-        item.classList.toggle("active", item === button);
+      document.querySelectorAll(".tab").forEach((tab) => {
+        tab.classList.toggle("active", tab === button);
       });
 
       document.querySelectorAll(".tab-panel").forEach((panel) => {
@@ -658,10 +822,12 @@ function setupTabs() {
 function sendChatMessage() {
   const text = messageInput?.value.trim();
 
-  if (!text) return;
+  if (!text || !state.peerId) return;
 
   const message = {
-    id: `${state.peerId}-${Date.now()}`,
+    id: `${state.peerId}-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 7)}`,
     sender: state.username,
     senderId: state.peerId,
     text,
@@ -702,69 +868,339 @@ function receiveChatMessage(message) {
       ? "message own-message"
       : "message";
 
-  element.innerHTML = `
-    <strong>${escapeHtml(message.sender)}</strong>
-    <p>${escapeHtml(message.text)}</p>
-    <small>${escapeHtml(message.timestamp)}</small>
-  `;
+  const sender = document.createElement("strong");
+  sender.textContent = message.sender || "Participant";
 
+  const text = document.createElement("p");
+  text.textContent = message.text || "";
+
+  const time = document.createElement("small");
+  time.textContent = message.timestamp || "";
+
+  element.append(sender, text, time);
   messagesContainer.appendChild(element);
   messagesContainer.scrollTop = messagesContainer.scrollHeight;
+}
+
+function renderPrivateUsers() {
+  const container = $("privateUsers");
+
+  if (!container) return;
+
+  container.replaceChildren();
+
+  const otherParticipants = [...state.participants.values()].filter(
+    (participant) => participant.id !== state.peerId
+  );
+
+  if (otherParticipants.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "No other participants are currently in the room.";
+    container.appendChild(empty);
+    return;
+  }
+
+  otherParticipants.forEach((participant) => {
+    const button = document.createElement("button");
+    button.className = "secondary-btn";
+    button.type = "button";
+    button.textContent =
+      state.selectedPrivateUser === participant.id
+        ? `Chatting with ${participant.name}`
+        : `Message ${participant.name}`;
+
+    button.addEventListener("click", () => {
+      selectPrivateUser(participant.id);
+    });
+
+    container.appendChild(button);
+  });
+
+  renderPrivateConversation();
+}
+
+function selectPrivateUser(peerId) {
+  if (!state.participants.has(peerId)) return;
+
+  state.selectedPrivateUser = peerId;
+  renderPrivateUsers();
+}
+
+function renderPrivateConversation() {
+  const container = $("privateUsers");
+
+  if (!container || !state.selectedPrivateUser) return;
+
+  const participant = state.participants.get(state.selectedPrivateUser);
+
+  if (!participant) return;
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "private-conversation";
+
+  const title = document.createElement("h4");
+  title.textContent = `Private conversation with ${participant.name}`;
+
+  const history = document.createElement("div");
+  history.className = "private-history";
+
+  const key = getConversationKey(
+    state.peerId,
+    state.selectedPrivateUser
+  );
+
+  const conversation = state.privateMessages.get(key) || [];
+
+  if (conversation.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "No private messages yet.";
+    history.appendChild(empty);
+  } else {
+    conversation.forEach((message) => {
+      const item = document.createElement("div");
+      item.className =
+        message.senderPeerId === state.peerId
+          ? "message own-message"
+          : "message";
+
+      const sender = document.createElement("strong");
+      sender.textContent = message.senderName;
+
+      const text = document.createElement("p");
+      text.textContent = message.text;
+
+      const time = document.createElement("small");
+      time.textContent = message.timestamp;
+
+      item.append(sender, text, time);
+      history.appendChild(item);
+    });
+  }
+
+  const form = document.createElement("form");
+  form.className = "message-form";
+
+  const input = document.createElement("input");
+  input.maxLength = 500;
+  input.placeholder = `Message ${participant.name}`;
+  input.autocomplete = "off";
+
+  const sendButton = document.createElement("button");
+  sendButton.className = "primary-btn";
+  sendButton.type = "submit";
+  sendButton.textContent = "Send";
+
+  form.append(input, sendButton);
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+
+    const text = input.value.trim();
+
+    if (!text) return;
+
+    sendPrivateMessage(participant.id, text);
+    input.value = "";
+    input.focus();
+  });
+
+  wrapper.append(title, history, form);
+  container.appendChild(wrapper);
+
+  history.scrollTop = history.scrollHeight;
+}
+
+function getConversationKey(firstId, secondId) {
+  return [firstId, secondId].sort().join("::");
+}
+
+function sendPrivateMessage(receiverPeerId, text) {
+  if (!receiverPeerId || receiverPeerId === state.peerId) {
+    showToast("You cannot message yourself.", "error");
+    return;
+  }
+
+  if (!state.participants.has(receiverPeerId)) {
+    showToast("That participant is no longer in the room.", "error");
+    return;
+  }
+
+  const message = {
+    id: `${state.peerId}-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 7)}`,
+    type: "PRIVATE_MESSAGE",
+    senderPeerId: state.peerId,
+    receiverPeerId,
+    senderName: state.username,
+    text,
+    timestamp: new Date().toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit"
+    })
+  };
+
+  receivePrivateMessage(message);
+
+  const directConnection = state.connections.get(receiverPeerId);
+
+  if (directConnection?.open) {
+    sendConnection(directConnection, {
+      type: "PRIVATE_MESSAGE",
+      message
+    });
+  } else if (state.isHost) {
+    const participantConnection = state.connections.get(receiverPeerId);
+
+    sendConnection(participantConnection, {
+      type: "PRIVATE_MESSAGE",
+      message
+    });
+  } else {
+    sendToHost({
+      type: "PRIVATE_MESSAGE",
+      message
+    });
+  }
+}
+
+function receivePrivateMessage(message) {
+  const key = getConversationKey(
+    message.senderPeerId,
+    message.receiverPeerId
+  );
+
+  if (!state.privateMessages.has(key)) {
+    state.privateMessages.set(key, []);
+  }
+
+  const conversation = state.privateMessages.get(key);
+
+  if (conversation.some((item) => item.id === message.id)) {
+    return;
+  }
+
+  conversation.push(message);
+
+  if (
+    state.selectedPrivateUser === message.senderPeerId ||
+    state.selectedPrivateUser === message.receiverPeerId
+  ) {
+    renderPrivateConversation();
+  } else {
+    showToast(`New private message from ${message.senderName}`, "success");
+  }
 }
 
 async function toggleCamera() {
   try {
     if (!state.localStream) {
-      state.localStream = await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true
       });
 
-      localVideo.srcObject = state.localStream;
-      localVideo.play().catch(() => {});
+      state.localStream = stream;
+      state.cameraEnabled = stream.getVideoTracks().length > 0;
+      state.micEnabled = stream.getAudioTracks().length > 0;
 
-      state.cameraEnabled = true;
-      state.micEnabled = true;
+      if (localVideo) {
+        localVideo.srcObject = stream;
+        localVideo.muted = true;
+        await localVideo.play().catch(() => {});
+      }
 
-      cameraBtn.textContent = "Disable Camera";
-      micBtn.textContent = "Disable Mic";
+      updateCallButtons();
 
-      state.connections.forEach((_, peerId) => {
-        startCall(peerId);
+      state.participants.forEach((participant) => {
+        if (participant.id !== state.peerId) {
+          startCall(participant.id);
+        }
       });
 
       showToast("Camera and microphone enabled.", "success");
       return;
     }
 
-    const track = state.localStream.getVideoTracks()[0];
+    const videoTrack = state.localStream.getVideoTracks()[0];
 
-    if (track) {
-      track.enabled = !track.enabled;
-      state.cameraEnabled = track.enabled;
-      cameraBtn.textContent = track.enabled
-        ? "Disable Camera"
-        : "Enable Camera";
+    if (!videoTrack) {
+      showToast("No camera track is available.", "error");
+      return;
     }
+
+    videoTrack.enabled = !videoTrack.enabled;
+    state.cameraEnabled = videoTrack.enabled;
+
+    updateCallButtons();
   } catch (error) {
-    console.error(error);
-    showToast("Camera permission was denied.", "error");
+    console.error("Camera error:", error);
+    showToast(
+      "Camera permission was denied or the camera is unavailable.",
+      "error"
+    );
   }
 }
 
 async function toggleMic() {
-  if (!state.localStream) {
-    await toggleCamera();
-    return;
+  try {
+    if (!state.localStream) {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true
+      });
+
+      state.localStream = stream;
+      state.micEnabled = stream.getAudioTracks().length > 0;
+      state.cameraEnabled = false;
+
+      if (localVideo) {
+        localVideo.srcObject = stream;
+        localVideo.muted = true;
+      }
+
+      updateCallButtons();
+
+      state.participants.forEach((participant) => {
+        if (participant.id !== state.peerId) {
+          startCall(participant.id);
+        }
+      });
+
+      showToast("Microphone enabled.", "success");
+      return;
+    }
+
+    const audioTrack = state.localStream.getAudioTracks()[0];
+
+    if (!audioTrack) {
+      showToast("No microphone track is available.", "error");
+      return;
+    }
+
+    audioTrack.enabled = !audioTrack.enabled;
+    state.micEnabled = audioTrack.enabled;
+
+    updateCallButtons();
+  } catch (error) {
+    console.error("Microphone error:", error);
+    showToast(
+      "Microphone permission was denied or the microphone is unavailable.",
+      "error"
+    );
+  }
+}
+
+function updateCallButtons() {
+  if (cameraBtn) {
+    cameraBtn.textContent = state.cameraEnabled
+      ? "Disable Camera"
+      : "Enable Camera";
   }
 
-  const track = state.localStream.getAudioTracks()[0];
-
-  if (track) {
-    track.enabled = !track.enabled;
-    state.micEnabled = track.enabled;
-
-    micBtn.textContent = track.enabled
+  if (micBtn) {
+    micBtn.textContent = state.micEnabled
       ? "Disable Mic"
       : "Enable Mic";
   }
@@ -772,9 +1208,25 @@ async function toggleMic() {
 
 function startCall(peerId) {
   if (!state.localStream || !state.peer || !peerId) return;
-  if (state.calls.has(peerId)) return;
+  if (peerId === state.peerId) return;
+
+  const participant = state.participants.get(peerId);
+
+  if (!participant) return;
+
+  const existingCall = state.calls.get(peerId);
+
+  if (existingCall) {
+    try {
+      existingCall.close();
+    } catch {}
+
+    state.calls.delete(peerId);
+  }
 
   const call = state.peer.call(peerId, state.localStream);
+
+  if (!call) return;
 
   state.calls.set(peerId, call);
 
@@ -783,15 +1235,26 @@ function startCall(peerId) {
   });
 
   call.on("close", () => {
-    state.calls.delete(peerId);
-    removeRemoteVideo(peerId);
+    if (state.calls.get(peerId) === call) {
+      state.calls.delete(peerId);
+      removeRemoteVideo(peerId);
+    }
+  });
+
+  call.on("error", (error) => {
+    console.error("Outgoing call error:", error);
   });
 }
 
 function handleIncomingCall(call) {
   if (!call) return;
 
-  call.answer(state.localStream || undefined);
+  if (state.localStream) {
+    call.answer(state.localStream);
+  } else {
+    call.answer();
+  }
+
   state.calls.set(call.peer, call);
 
   call.on("stream", (stream) => {
@@ -799,13 +1262,19 @@ function handleIncomingCall(call) {
   });
 
   call.on("close", () => {
-    state.calls.delete(call.peer);
-    removeRemoteVideo(call.peer);
+    if (state.calls.get(call.peer) === call) {
+      state.calls.delete(call.peer);
+      removeRemoteVideo(call.peer);
+    }
+  });
+
+  call.on("error", (error) => {
+    console.error("Incoming call error:", error);
   });
 }
 
 function addRemoteVideo(peerId, stream) {
-  if (!remoteVideos) return;
+  if (!remoteVideos || !stream) return;
 
   let wrapper = [...remoteVideos.children].find(
     (child) => child.dataset.peer === peerId
@@ -824,8 +1293,7 @@ function addRemoteVideo(peerId, stream) {
     label.textContent =
       state.participants.get(peerId)?.name || "Participant";
 
-    wrapper.appendChild(video);
-    wrapper.appendChild(label);
+    wrapper.append(video, label);
     remoteVideos.appendChild(wrapper);
   }
 
@@ -851,8 +1319,16 @@ function setupCanvas() {
   state.canvas = canvas;
   state.canvasContext = canvas.getContext("2d");
 
+  canvas.style.touchAction = "none";
+
   canvas.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+
     state.drawing = true;
+
+    try {
+      canvas.setPointerCapture(event.pointerId);
+    } catch {}
 
     const point = getCanvasPoint(event);
 
@@ -869,6 +1345,8 @@ function setupCanvas() {
   canvas.addEventListener("pointermove", (event) => {
     if (!state.drawing) return;
 
+    event.preventDefault();
+
     const point = getCanvasPoint(event);
 
     drawCanvasPoint(point.x, point.y);
@@ -881,10 +1359,15 @@ function setupCanvas() {
   });
 
   canvas.addEventListener("pointerup", endCanvasDrawing);
+  canvas.addEventListener("pointercancel", endCanvasDrawing);
   canvas.addEventListener("pointerleave", endCanvasDrawing);
 }
 
 function getCanvasPoint(event) {
+  if (!state.canvas) {
+    return { x: 0, y: 0 };
+  }
+
   const rect = state.canvas.getBoundingClientRect();
 
   return {
@@ -898,7 +1381,9 @@ function drawCanvasPoint(x, y) {
 
   state.canvasContext.lineWidth = 3;
   state.canvasContext.lineCap = "round";
+  state.canvasContext.lineJoin = "round";
   state.canvasContext.strokeStyle = "#7b2348";
+
   state.canvasContext.lineTo(x, y);
   state.canvasContext.stroke();
 }
@@ -937,8 +1422,31 @@ function handleCanvasPayload(payload, connection) {
     state.canvasContext.closePath();
   }
 
-  if (state.isHost) {
+  if (state.isHost && connection?.peer) {
     broadcast(payload, connection.peer);
+  }
+}
+
+function clearCanvas(announce = true) {
+  if (!state.canvas || !state.canvasContext) return;
+
+  state.canvasContext.clearRect(
+    0,
+    0,
+    state.canvas.width,
+    state.canvas.height
+  );
+
+  if (announce) {
+    const payload = {
+      type: "CANVAS_CLEAR"
+    };
+
+    if (state.isHost) {
+      broadcast(payload);
+    } else {
+      sendToHost(payload);
+    }
   }
 }
 
@@ -952,103 +1460,106 @@ function setupGame() {
 
   gameBoard.dataset.ready = "true";
 
-  document.addEventListener("keydown", (event) => {
-    const key = event.key.toLowerCase();
+  document.addEventListener("keydown", handleGameKeydown);
+}
 
-    if (
-      ![
-        "w",
-        "a",
-        "s",
-        "d",
-        "arrowup",
-        "arrowdown",
-        "arrowleft",
-        "arrowright"
-      ].includes(key)
-    ) {
-      return;
-    }
+function handleGameKeydown(event) {
+  const gameBoard = $("gameBoard");
+  const player = $("player");
 
-    if (document.activeElement?.tagName === "INPUT") return;
+  if (!gameBoard || !player) return;
 
-    event.preventDefault();
+  const key = event.key.toLowerCase();
 
-    if (key === "w" || key === "arrowup") {
-      state.gamePosition.y = Math.max(0, state.gamePosition.y - 3);
-    }
+  const movementKeys = [
+    "w",
+    "a",
+    "s",
+    "d",
+    "arrowup",
+    "arrowdown",
+    "arrowleft",
+    "arrowright"
+  ];
 
-    if (key === "s" || key === "arrowdown") {
-      state.gamePosition.y = Math.min(92, state.gamePosition.y + 3);
-    }
+  if (!movementKeys.includes(key)) return;
 
-    if (key === "a" || key === "arrowleft") {
-      state.gamePosition.x = Math.max(0, state.gamePosition.x - 3);
-    }
+  if (document.activeElement?.tagName === "INPUT") return;
 
-    if (key === "d" || key === "arrowright") {
-      state.gamePosition.x = Math.min(92, state.gamePosition.x + 3);
-    }
+  if (screens?.app?.classList.contains("hidden")) return;
 
-    player.style.left = `${state.gamePosition.x}%`;
-    player.style.top = `${state.gamePosition.y}%`;
+  event.preventDefault();
 
-    const payload = {
-      type: "GAME_UPDATE",
-      peerId: state.peerId,
-      x: state.gamePosition.x,
-      y: state.gamePosition.y
-    };
+  if (key === "w" || key === "arrowup") {
+    state.gamePosition.y = Math.max(0, state.gamePosition.y - 3);
+  }
 
-    if (state.isHost) {
-      broadcast(payload);
-    } else {
-      sendToHost(payload);
-    }
-  });
+  if (key === "s" || key === "arrowdown") {
+    state.gamePosition.y = Math.min(92, state.gamePosition.y + 3);
+  }
+
+  if (key === "a" || key === "arrowleft") {
+    state.gamePosition.x = Math.max(0, state.gamePosition.x - 3);
+  }
+
+  if (key === "d" || key === "arrowright") {
+    state.gamePosition.x = Math.min(92, state.gamePosition.x + 3);
+  }
+
+  player.style.left = `${state.gamePosition.x}%`;
+  player.style.top = `${state.gamePosition.y}%`;
+
+  const payload = {
+    type: "GAME_UPDATE",
+    peerId: state.peerId,
+    x: state.gamePosition.x,
+    y: state.gamePosition.y
+  };
+
+  if (state.isHost) {
+    broadcast(payload);
+  } else {
+    sendToHost(payload);
+  }
+}
+
+function handleGameUpdate(payload, connection) {
+  updateRemoteGame(payload);
+
+  if (state.isHost && connection?.peer) {
+    broadcast(payload, connection.peer);
+  }
 }
 
 function updateRemoteGame(payload) {
   const gameBoard = $("gameBoard");
 
-  if (!gameBoard || payload.peerId === state.peerId) return;
-
-  let player = state.remotePlayers.get(payload.peerId);
-
-  if (!player) {
-    player = document.createElement("div");
-    player.className = "remote-player";
-    gameBoard.appendChild(player);
-    state.remotePlayers.set(payload.peerId, player);
+  if (!gameBoard || !payload.peerId || payload.peerId === state.peerId) {
+    return;
   }
 
-  player.style.left = `${payload.x}%`;
-  player.style.top = `${payload.y}%`;
+  let remotePlayer = state.remotePlayers.get(payload.peerId);
+
+  if (!remotePlayer) {
+    remotePlayer = document.createElement("div");
+    remotePlayer.className = "remote-player";
+    remotePlayer.dataset.peer = payload.peerId;
+    gameBoard.appendChild(remotePlayer);
+    state.remotePlayers.set(payload.peerId, remotePlayer);
+  }
+
+  remotePlayer.style.left = `${payload.x}%`;
+  remotePlayer.style.top = `${payload.y}%`;
 }
 
-function renderPrivateUsers() {
-  const container = $("privateUsers");
+function removeRemotePlayer(peerId) {
+  const player = state.remotePlayers.get(peerId);
 
-  if (!container) return;
+  if (player) {
+    player.remove();
+  }
 
-  container.innerHTML = "";
-
-  state.participants.forEach((participant) => {
-    if (participant.id === state.peerId) return;
-
-    const button = document.createElement("button");
-    button.className = "secondary-btn";
-    button.type = "button";
-    button.textContent = `Message ${participant.name}`;
-
-    button.onclick = () => {
-      messageInput.value = `@${participant.name} `;
-      messageInput.focus();
-      document.querySelector('[data-tab="chat"]')?.click();
-    };
-
-    container.appendChild(button);
-  });
+  state.remotePlayers.delete(peerId);
 }
 
 async function copyRoomCode() {
@@ -1057,12 +1568,12 @@ async function copyRoomCode() {
   try {
     await navigator.clipboard.writeText(state.roomCode);
   } catch {
-    const input = document.createElement("input");
-    input.value = state.roomCode;
-    document.body.appendChild(input);
-    input.select();
+    const temporaryInput = document.createElement("input");
+    temporaryInput.value = state.roomCode;
+    document.body.appendChild(temporaryInput);
+    temporaryInput.select();
     document.execCommand("copy");
-    input.remove();
+    temporaryInput.remove();
   }
 
   setText("copyStatus", "Copied!");
@@ -1091,18 +1602,18 @@ function leaveRoom() {
   resetToLobby();
 }
 
-function resetToLobby() {
-  state.localStream?.getTracks().forEach((track) => track.stop());
-
-  state.connections.forEach((connection) => {
-    try {
-      connection.close();
-    } catch {}
-  });
+async function resetConnectionOnly() {
+  stopLocalMedia();
 
   state.calls.forEach((call) => {
     try {
       call.close();
+    } catch {}
+  });
+
+  state.connections.forEach((connection) => {
+    try {
+      connection.close();
     } catch {}
   });
 
@@ -1115,39 +1626,111 @@ function resetToLobby() {
   state.hostPeerId = null;
   state.hostConnection = null;
 
-  state.roomCode = "";
-  state.username = "";
-  state.isHost = false;
-
   state.connections.clear();
   state.pendingRequests.clear();
   state.participants.clear();
-  state.messages = [];
   state.calls.clear();
+  state.remotePlayers.forEach((player) => player.remove());
   state.remotePlayers.clear();
 
   state.localStream = null;
   state.cameraEnabled = false;
   state.micEnabled = false;
 
+  updateCallButtons();
+}
+
+function stopLocalMedia() {
+  if (!state.localStream) return;
+
+  state.localStream.getTracks().forEach((track) => {
+    track.stop();
+  });
+
+  state.localStream = null;
+
+  if (localVideo) {
+    localVideo.srcObject = null;
+  }
+}
+
+function cleanupConnections() {
+  stopLocalMedia();
+
+  state.calls.forEach((call) => {
+    try {
+      call.close();
+    } catch {}
+  });
+
+  state.connections.forEach((connection) => {
+    try {
+      connection.close();
+    } catch {}
+  });
+
+  try {
+    state.peer?.destroy();
+  } catch {}
+}
+
+function resetToLobby() {
+  resetConnectionOnly();
+
+  state.roomCode = "";
+  state.username = "";
+  state.isHost = false;
+
+  state.messages = [];
+  state.privateMessages.clear();
+  state.selectedPrivateUser = null;
+  state.gamePosition = { x: 5, y: 5 };
+
   if (messagesContainer) {
-    messagesContainer.innerHTML = `
-      <div class="message system">
-        <p>Welcome to MINGLE. Start the conversation.</p>
-      </div>
-    `;
+    messagesContainer.replaceChildren();
+
+    const welcome = document.createElement("div");
+    welcome.className = "message system";
+
+    const text = document.createElement("p");
+    text.textContent = "Welcome to MINGLE. Start the conversation.";
+
+    welcome.appendChild(text);
+    messagesContainer.appendChild(welcome);
   }
 
-  if (remoteVideos) remoteVideos.innerHTML = "";
-  if (pendingRequests) pendingRequests.innerHTML = "";
-  if (participantsList) participantsList.innerHTML = "";
+  if (remoteVideos) {
+    remoteVideos.replaceChildren();
+  }
 
-  if (cameraBtn) cameraBtn.textContent = "Enable Camera";
-  if (micBtn) micBtn.textContent = "Enable Mic";
+  if (pendingRequests) {
+    pendingRequests.replaceChildren();
+  }
 
-  if (pendingCount) pendingCount.textContent = "0";
-  if (participantCount) participantCount.textContent = "0";
+  if (participantsList) {
+    participantsList.replaceChildren();
+  }
 
-  setStatus("");
+  if ($("privateUsers")) {
+    $("privateUsers").replaceChildren();
+  }
+
+  setText("displayRoomCode", "------");
+  setText("currentUserName", "");
+  setText("roomTitle", "MINGLE Room");
+  setText("connectionStatus", "Disconnected");
+  setText("copyStatus", "");
+  setText("lobbyStatus", "");
+
+  if (participantCount) {
+    participantCount.textContent = "0";
+  }
+
+  if (pendingCount) {
+    pendingCount.textContent = "0";
+  }
+
+  pendingSection?.classList.add("hidden");
+
   showScreen("lobby");
 }
