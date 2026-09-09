@@ -1,33 +1,29 @@
 /**
- * MINGLE - Fixed Room Join & Multi-Peer Mesh Connection
+ * MINGLE - Fully Fixed Multi-Peer WebRTC Architecture
  */
 
 (function () {
     'use strict';
 
-    // APP STATE
     const state = {
         peer: null,
         peerId: null,
         roomCode: null,
         username: '',
         isHost: false,
-        connections: {}, // peerId -> DataConnection
-        participants: {}, // peerId -> { username, isHost }
-        pendingApprovals: {}, // peerId -> { username, conn }
+        connections: {},
+        participants: {},
+        pendingApprovals: {},
         selectedPrivatePeerId: '',
-        privateMessages: {}, // peerId -> Array
+        privateMessages: {},
         localStream: null,
-        mediaCalls: {}, // peerId -> MediaConnection
+        mediaCalls: {},
         canvasCtx: null,
         isDrawing: false,
-        gameState: {
-            activeGame: null,
-            data: {}
-        }
+        gameState: { activeGame: null, data: {} }
     };
 
-    // PEERJS CONFIG WITH GUARANTEED STUN SERVERS
+    // Robust STUN servers configuration
     const PEER_CONFIG = {
         debug: 1,
         config: {
@@ -37,12 +33,10 @@
                 { urls: 'stun:stun2.l.google.com:19302' },
                 { urls: 'stun:stun3.l.google.com:19302' },
                 { urls: 'stun:stun4.l.google.com:19302' }
-            ],
-            sdpSemantics: 'unified-plan'
+            ]
         }
     };
 
-    // DOM ELEMENTS
     const el = {
         lobbyScreen: document.getElementById('lobby-screen'),
         waitingScreen: document.getElementById('waiting-screen'),
@@ -87,22 +81,15 @@
         toastContainer: document.getElementById('toast-container')
     };
 
-    // SPYFALL DATA
     const SPYFALL_DATA = [
-        { location: 'Airplane', roles: ['Pilot', 'First Class Passenger', 'Flight Attendant', 'Co-Pilot', 'Security Guard'] },
-        { location: 'Bank', roles: ['Armored Car Driver', 'Manager', 'Consultant', 'Customer', 'Teller', 'Security Guard'] },
-        { location: 'Beach', roles: ['Lifeguard', 'Surfer', 'Ice Cream Vendor', 'Photographer', 'Sunbather'] },
-        { location: 'Hospital', roles: ['Doctor', 'Nurse', 'Patient', 'Surgeon', 'Anesthesiologist', 'Visitor'] },
-        { location: 'Movie Studio', roles: ['Stuntman', 'Director', 'Actor', 'Cameraman', 'Producer', 'Sound Tech'] },
-        { location: 'Pirate Ship', roles: ['Captain', 'Cook', 'Sailor', 'Prisoner', 'Cannoneer', 'Lookout'] }
+        { location: 'Airplane', roles: ['Pilot', 'Passenger', 'Flight Attendant'] },
+        { location: 'Bank', roles: ['Manager', 'Teller', 'Security Guard'] },
+        { location: 'Beach', roles: ['Lifeguard', 'Surfer', 'Sunbather'] }
     ];
 
-    // TRIVIA DATA
     const TRIVIA_DATA = [
         { q: "What is the capital of France?", options: ["Berlin", "Madrid", "Paris", "Rome"], a: 2 },
-        { q: "Which planet is known as the Red Planet?", options: ["Venus", "Mars", "Jupiter", "Saturn"], a: 1 },
-        { q: "Which element has the chemical symbol 'O'?", options: ["Gold", "Oxygen", "Osmium", "Silver"], a: 1 },
-        { q: "How many sides does a hexagon have?", options: ["5", "6", "7", "8"], a: 1 }
+        { q: "Which planet is known as the Red Planet?", options: ["Venus", "Mars", "Jupiter"], a: 1 }
     ];
 
     function init() {
@@ -226,13 +213,7 @@
 
             peer.on('error', (err) => {
                 console.error('PeerJS Error:', err);
-                if (err.type === 'unavailable-id') {
-                    reject(new Error('ROOM_EXISTS'));
-                } else if (err.type === 'peer-unavailable') {
-                    reject(new Error('ROOM_NOT_FOUND'));
-                } else {
-                    reject(err);
-                }
+                reject(err);
             });
         });
     }
@@ -257,15 +238,12 @@
                 created = true;
                 enterRoom();
             } catch (err) {
-                if (err.message !== 'ROOM_EXISTS') {
-                    showLobbyStatus('Connection error. Try again.');
-                    return;
-                }
+                console.warn('Room code retry:', err);
             }
         }
 
         if (!created) {
-            showLobbyStatus('Failed to generate a unique room code. Try again.');
+            showLobbyStatus('Failed to generate room. Try again.');
         }
     }
 
@@ -301,7 +279,7 @@
                         tryConnect();
                     } else if (!connected) {
                         resetToLobby();
-                        showToast('Room not found or host offline. Check room code.');
+                        showToast('Host offline or invalid code.');
                     }
                 }, 4000);
 
@@ -332,7 +310,7 @@
 
         } catch (err) {
             resetToLobby();
-            showToast('Failed to initialize connection engine.');
+            showToast('Failed to connect to PeerJS.');
         }
     }
 
@@ -882,10 +860,7 @@
                 spyPeerId: spyPeerId
             };
         } else if (gameType === 'trivia' || gameType === 'music') {
-            state.gameState.data = {
-                questionIndex: 0,
-                scores: {}
-            };
+            state.gameState.data = { questionIndex: 0, scores: {} };
             Object.keys(state.participants).forEach(id => state.gameState.data.scores[id] = 0);
         }
 
@@ -930,7 +905,7 @@
                             ${isSpy ? '🕵️ YOU ARE THE SPY!' : `📍 Location: ${state.gameState.data.location}`}
                         </div>
                         <p style="color: var(--text-muted);">
-                            ${isSpy ? 'Figure out the secret location before time runs out!' : `Your Role: ${secretRole}`}
+                            ${isSpy ? 'Figure out the location!' : `Your Role: ${secretRole}`}
                         </p>
                     </div>
                 `;
@@ -957,25 +932,6 @@
                         if (selected === currentQ.a) showToast('Correct!');
                         else showToast('Incorrect!');
                     });
-                });
-            }
-        } else if (state.gameState.activeGame === 'music') {
-            if (el.gameTitle) el.gameTitle.textContent = 'Music Guesser';
-            if (el.gameDisplay) {
-                el.gameDisplay.innerHTML = `
-                    <div style="padding: 10px; text-align: center;">
-                        <h3>Guess the song title:</h3>
-                        <p style="font-style: italic; margin: 15px 0; color: var(--accent);">
-                            "Is this the real life? Is this just fantasy? Caught in a landslide..."
-                        </p>
-                        <input type="text" id="music-guess-input" placeholder="Enter song title..." style="margin-bottom: 10px;">
-                        <button id="btn-submit-music" class="btn btn-primary btn-block">Submit Answer</button>
-                    </div>
-                `;
-                document.getElementById('btn-submit-music')?.addEventListener('click', () => {
-                    const val = document.getElementById('music-guess-input').value.trim().toLowerCase();
-                    if (val.includes('bohemian rhapsody')) showToast('Correct Guess!');
-                    else showToast('Try again!');
                 });
             }
         }
