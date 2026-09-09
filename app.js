@@ -1,5 +1,5 @@
 /* =========================================================
-   MINGLE - Main Application Script (Production-Ready WebRTC)
+   MINGLE - Corrected Main Application Script
    ========================================================= */
 
 const state = {
@@ -10,7 +10,7 @@ const state = {
   username: "",
   isHost: false,
   connection: null,
-  connections: new Map(), // Host tracks guest connections
+  connections: new Map(),
   pendingRequests: new Map(),
   participants: [],
   messages: [],
@@ -42,9 +42,10 @@ const leaveRoomBtn = $("leaveRoomBtn");
 
 const pendingSection = $("pendingSection");
 const pendingRequests = $("pendingRequests");
+const pendingCount = $("pendingCount");
+
 const participantsList = $("participants");
 const participantCount = $("participantCount");
-const pendingCount = $("pendingCount");
 
 const messagesContainer = $("messages");
 const chatForm = $("chatForm");
@@ -57,41 +58,38 @@ const micBtn = $("micBtn");
 const localVideo = $("localVideo");
 const remoteVideos = $("remoteVideos");
 
-/* =========================
-   ICE & PEER CONFIGURATION
-========================= */
+/* =========================================================
+   PEERJS CONFIGURATION
+========================================================= */
 
-// Free STUN/TURN servers to allow cross-network NAT traversal
 const PEER_CONFIG = {
   host: "0.peerjs.com",
   port: 443,
   path: "/",
   secure: true,
-  debug: 1,
+  debug: 2,
   config: {
     iceServers: [
-      { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:stun1.l.google.com:19302" },
-      { urls: "stun:stun2.l.google.com:19302" },
-      { urls: "stun:stun.cloudflare.com:3478" },
-      // Open relay fallback for strict firewalls/Symmetric NAT
       {
-        urls: "turn:openrelay.metered.ca:80",
-        username: "openrelay",
-        credential: "openrelay"
+        urls: "stun:stun.l.google.com:19302"
       },
       {
-        urls: "turn:openrelay.metered.ca:443",
-        username: "openrelay",
-        credential: "openrelay"
+        urls: "stun:stun1.l.google.com:19302"
+      },
+      {
+        urls: "stun:stun.cloudflare.com:3478"
       }
     ]
   }
 };
 
-function getRoomPeerId(code) {
-  return `mingle-room-${code.toUpperCase().trim()}`;
+function getRoomPeerId(roomCode) {
+  return `mingle-room-${roomCode.trim().toUpperCase()}`;
 }
+
+/* =========================================================
+   GENERAL UI
+========================================================= */
 
 function showScreen(screenName) {
   Object.values(screens).forEach((screen) => {
@@ -101,6 +99,11 @@ function showScreen(screenName) {
   if (screens[screenName]) {
     screens[screenName].classList.remove("hidden");
   }
+}
+
+function setStatus(message) {
+  const status = $("lobbyStatus");
+  if (status) status.textContent = message;
 }
 
 function showToast(message, type = "info") {
@@ -118,20 +121,6 @@ function showToast(message, type = "info") {
   }, 3500);
 }
 
-function setStatus(message) {
-  const status = $("lobbyStatus");
-  if (status) status.textContent = message;
-}
-
-function generateRoomCode() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let result = "";
-  for (let i = 0; i < 6; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return result;
-}
-
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -141,25 +130,49 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-/* =========================
-   PARTICIPANTS MANAGEMENT
-========================= */
+function generateRoomCode() {
+  const characters = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+
+  for (let i = 0; i < 6; i++) {
+    code += characters.charAt(
+      Math.floor(Math.random() * characters.length)
+    );
+  }
+
+  return code;
+}
+
+/* =========================================================
+   PARTICIPANTS
+========================================================= */
 
 function addParticipant(id, name, isHost = false) {
-  const existing = state.participants.find((p) => p.id === id);
+  if (!id) return;
+
+  const existing = state.participants.find(
+    (participant) => participant.id === id
+  );
 
   if (existing) {
     existing.name = name;
     existing.isHost = isHost;
   } else {
-    state.participants.push({ id, name, isHost });
+    state.participants.push({
+      id,
+      name,
+      isHost
+    });
   }
 
   renderParticipants();
 }
 
 function removeParticipant(id) {
-  state.participants = state.participants.filter((p) => p.id !== id);
+  state.participants = state.participants.filter(
+    (participant) => participant.id !== id
+  );
+
   renderParticipants();
 }
 
@@ -174,11 +187,20 @@ function renderParticipants() {
 
     item.innerHTML = `
       <span class="participant-avatar">
-        ${escapeHtml(participant.name.charAt(0).toUpperCase())}
+        ${escapeHtml(
+          String(participant.name || "?")
+            .charAt(0)
+            .toUpperCase()
+        )}
       </span>
+
       <span class="participant-name">
-        ${escapeHtml(participant.name)}
-        ${participant.isHost ? "<small>Host</small>" : ""}
+        ${escapeHtml(participant.name || "Participant")}
+        ${
+          participant.isHost
+            ? "<small>Host</small>"
+            : ""
+        }
       </span>
     `;
 
@@ -190,25 +212,32 @@ function renderParticipants() {
   }
 }
 
-/* =========================
-   PENDING REQUESTS (HOST)
-========================= */
+/* =========================================================
+   PENDING JOIN REQUESTS
+========================================================= */
 
 function renderPendingRequests() {
-  if (!pendingRequests) return;
+  if (!pendingRequests) {
+    console.error("Missing HTML element: pendingRequests");
+    return;
+  }
 
   pendingRequests.innerHTML = "";
 
   if (pendingCount) {
-    pendingCount.textContent = state.pendingRequests.size;
+    pendingCount.textContent = String(
+      state.pendingRequests.size
+    );
   }
 
-  if (state.isHost && pendingSection) {
+  if (pendingSection && state.isHost) {
     pendingSection.classList.remove("hidden");
+    pendingSection.style.display = "block";
   }
 
   if (state.pendingRequests.size === 0) {
-    pendingRequests.innerHTML = '<p class="empty-state">No pending requests</p>';
+    pendingRequests.innerHTML =
+      '<p class="empty-state">No pending requests</p>';
     return;
   }
 
@@ -218,86 +247,168 @@ function renderPendingRequests() {
 
     card.innerHTML = `
       <div>
-        <strong>${escapeHtml(request.username)}</strong>
-        <small>Wants to join</small>
+        <strong>
+          ${escapeHtml(request.username || "Participant")}
+        </strong>
+
+        <small>Wants to join your room</small>
       </div>
+
       <div class="request-actions">
-        <button class="admit-btn" data-peer="${peerId}">Admit</button>
-        <button class="reject-btn" data-peer="${peerId}">Reject</button>
+        <button
+          type="button"
+          class="admit-btn"
+          data-peer="${escapeHtml(peerId)}"
+        >
+          Admit
+        </button>
+
+        <button
+          type="button"
+          class="reject-btn"
+          data-peer="${escapeHtml(peerId)}"
+        >
+          Reject
+        </button>
       </div>
     `;
 
     pendingRequests.appendChild(card);
   });
 
-  pendingRequests.querySelectorAll(".admit-btn").forEach((button) => {
-    button.onclick = () => admitGuest(button.dataset.peer);
-  });
+  pendingRequests
+    .querySelectorAll(".admit-btn")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        admitGuest(button.dataset.peer);
+      });
+    });
 
-  pendingRequests.querySelectorAll(".reject-btn").forEach((button) => {
-    button.onclick = () => rejectGuest(button.dataset.peer);
-  });
+  pendingRequests
+    .querySelectorAll(".reject-btn")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        rejectGuest(button.dataset.peer);
+      });
+    });
 }
 
-/* =========================
-   PEERJS CORE SETUP
-========================= */
+/* =========================================================
+   PEERJS CONNECTION
+========================================================= */
 
 function createPeer(customId = null) {
   return new Promise((resolve, reject) => {
-    let settled = false;
+    let completed = false;
 
-    state.peer = customId
+    if (state.peer) {
+      try {
+        state.peer.destroy();
+      } catch (error) {
+        console.warn("Previous peer cleanup failed:", error);
+      }
+
+      state.peer = null;
+    }
+
+    const peer = customId
       ? new Peer(customId, PEER_CONFIG)
       : new Peer(PEER_CONFIG);
 
-    const timeout = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        reject(new Error("Peer connection timed out reaching signaling server."));
-      }
-    }, 15000);
+    state.peer = peer;
 
-    state.peer.on("open", (id) => {
+    const timeout = setTimeout(() => {
+      if (completed) return;
+
+      completed = true;
+
+      try {
+        peer.destroy();
+      } catch (error) {
+        console.warn(error);
+      }
+
+      reject(
+        new Error(
+          "PeerJS could not connect to the signaling server."
+        )
+      );
+    }, 20000);
+
+    peer.on("open", (id) => {
       clearTimeout(timeout);
+
       state.peerId = id;
-      if (!settled) {
-        settled = true;
+
+      console.log("Peer opened successfully:", id);
+
+      if (!completed) {
+        completed = true;
         resolve(id);
       }
     });
 
-    state.peer.on("connection", (connection) => {
+    peer.on("connection", (connection) => {
+      console.log(
+        "Incoming data connection received:",
+        connection.peer
+      );
+
       setupConnection(connection);
     });
 
-    state.peer.on("call", (call) => {
+    peer.on("call", (call) => {
+      console.log("Incoming media call:", call.peer);
       handleIncomingCall(call);
     });
 
-    state.peer.on("error", (error) => {
+    peer.on("error", (error) => {
       console.error("PeerJS error:", error);
 
-      if (!settled) {
+      if (!completed) {
         clearTimeout(timeout);
-        settled = true;
+        completed = true;
         reject(error);
         return;
       }
 
       if (error.type === "unavailable-id") {
-        showToast("That room code is currently active. Try creating again.", "error");
+        showToast(
+          "This room is already active. Try another room code.",
+          "error"
+        );
       } else if (error.type === "peer-unavailable") {
-        showToast("Room not found or host is offline.", "error");
+        showToast(
+          "The room host is unavailable.",
+          "error"
+        );
+      } else if (error.type === "network") {
+        showToast(
+          "PeerJS network error. Check your internet connection.",
+          "error"
+        );
       } else {
-        showToast("Network/WebRTC connection issue occurred.", "error");
+        showToast(
+          `Connection error: ${error.type || "unknown error"}`,
+          "error"
+        );
       }
     });
 
-    state.peer.on("disconnected", () => {
-      if (state.peer && !state.peer.destroyed) {
+    peer.on("disconnected", () => {
+      console.warn("Peer disconnected from signaling server.");
+
+      if (
+        state.peer &&
+        !state.peer.destroyed &&
+        !state.peer.disconnected
+      ) {
         state.peer.reconnect();
       }
+    });
+
+    peer.on("close", () => {
+      console.warn("Peer connection closed.");
     });
   });
 }
@@ -305,17 +416,36 @@ function createPeer(customId = null) {
 function setupConnection(connection) {
   if (!connection) return;
 
+  console.log(
+    "Setting up connection with:",
+    connection.peer
+  );
+
   state.connections.set(connection.peer, connection);
 
   connection.on("open", () => {
-    console.log("Data channel open with:", connection.peer);
+    console.log(
+      "Data connection opened with:",
+      connection.peer
+    );
   });
 
   connection.on("data", (payload) => {
+    console.log(
+      "Data received from:",
+      connection.peer,
+      payload
+    );
+
     handlePayload(payload, connection);
   });
 
   connection.on("close", () => {
+    console.log(
+      "Connection closed:",
+      connection.peer
+    );
+
     state.connections.delete(connection.peer);
     state.pendingRequests.delete(connection.peer);
     state.calls.delete(connection.peer);
@@ -328,43 +458,62 @@ function setupConnection(connection) {
         type: "PARTICIPANTS_UPDATE",
         participants: state.participants
       });
-    } else if (connection.peer === state.hostPeerId) {
-      showToast("Host left the room. Session ended.", "error");
+    } else if (
+      connection.peer === state.hostPeerId
+    ) {
+      showToast(
+        "The host left the room.",
+        "error"
+      );
+
       resetToLobby();
     }
   });
 
-  connection.on("error", (err) => {
-    console.error("Connection error:", err);
+  connection.on("error", (error) => {
+    console.error(
+      "Data connection error:",
+      connection.peer,
+      error
+    );
   });
 }
 
 function broadcast(payload, exceptPeerId = null) {
   state.connections.forEach((connection, peerId) => {
     if (peerId === exceptPeerId) return;
-    if (connection.open) {
+
+    if (connection && connection.open) {
       try {
         connection.send(payload);
       } catch (error) {
-        console.error("Broadcast error:", error);
+        console.error("Broadcast failed:", error);
       }
     }
   });
 }
 
 function sendToHost(payload) {
-  if (state.connection && state.connection.open) {
-    try {
-      state.connection.send(payload);
-    } catch (error) {
-      console.error("Send to host error:", error);
-    }
+  if (!state.connection) {
+    console.warn("No host connection exists.");
+    return;
+  }
+
+  if (!state.connection.open) {
+    console.warn("Host connection is not open.");
+    return;
+  }
+
+  try {
+    state.connection.send(payload);
+  } catch (error) {
+    console.error("Could not send to host:", error);
   }
 }
 
-/* =========================
-   PAYLOAD & EVENT HANDLING
-========================= */
+/* =========================================================
+   MESSAGE HANDLING
+========================================================= */
 
 function handlePayload(payload, connection) {
   if (!payload || !payload.type) return;
@@ -379,19 +528,29 @@ function handlePayload(payload, connection) {
       break;
 
     case "PARTICIPANTS_UPDATE":
-      state.participants = payload.participants || [];
+      state.participants = Array.isArray(
+        payload.participants
+      )
+        ? payload.participants
+        : [];
+
       renderParticipants();
       break;
 
     case "CHAT_MESSAGE":
       receiveChatMessage(payload.message);
+
       if (state.isHost) {
         broadcast(payload, connection.peer);
       }
       break;
 
     case "REJECTED":
-      showToast("The host rejected your join request.", "error");
+      showToast(
+        "The host rejected your request.",
+        "error"
+      );
+
       resetToLobby();
       break;
 
@@ -399,12 +558,16 @@ function handlePayload(payload, connection) {
       if (state.isHost) {
         state.pendingRequests.delete(connection.peer);
         renderPendingRequests();
-        showToast(`${payload.username} cancelled their request.`);
+
+        showToast(
+          `${payload.username || "Participant"} cancelled their request.`
+        );
       }
       break;
 
     case "CANVAS_UPDATE":
       drawRemoteCanvas(payload);
+
       if (state.isHost) {
         broadcast(payload, connection.peer);
       }
@@ -412,6 +575,7 @@ function handlePayload(payload, connection) {
 
     case "GAME_UPDATE":
       updateRemoteGame(payload);
+
       if (state.isHost) {
         broadcast(payload, connection.peer);
       }
@@ -419,16 +583,20 @@ function handlePayload(payload, connection) {
   }
 }
 
-/* =========================
-   ROOM CREATION & JOINING
-========================= */
+/* =========================================================
+   CREATE ROOM
+========================================================= */
 
 async function createRoom() {
-  const username = usernameInput.value.trim();
+  const username = usernameInput?.value.trim();
 
   if (!username) {
     showToast("Please enter your name.", "error");
     return;
+  }
+
+  if (createRoomBtn) {
+    createRoomBtn.disabled = true;
   }
 
   state.username = username;
@@ -441,31 +609,68 @@ async function createRoom() {
   try {
     await createPeer(state.hostPeerId);
 
-    addParticipant(state.peerId, state.username, true);
+    addParticipant(
+      state.peerId,
+      state.username,
+      true
+    );
 
-    roomCodeDisplay.textContent = state.roomCode;
-    $("currentUserName").textContent = state.username;
-    $("roomTitle").textContent = `MINGLE Room ${state.roomCode}`;
+    if (roomCodeDisplay) {
+      roomCodeDisplay.textContent = state.roomCode;
+    }
+
+    if ($("currentUserName")) {
+      $("currentUserName").textContent =
+        state.username;
+    }
+
+    if ($("roomTitle")) {
+      $("roomTitle").textContent =
+        `MINGLE Room ${state.roomCode}`;
+    }
 
     showScreen("app");
+
     renderParticipants();
     renderPendingRequests();
     setupAllFeatures();
+
     setStatus("");
 
-    showToast(`Room created! Share code: ${state.roomCode}`, "success");
+    showToast(
+      `Room created! Share code: ${state.roomCode}`,
+      "success"
+    );
   } catch (error) {
-    console.error("Create room error:", error);
-    if (state.peer) state.peer.destroy();
-    state.peer = null;
+    console.error("Create room failed:", error);
+
+    if (state.peer) {
+      state.peer.destroy();
+      state.peer = null;
+    }
+
     setStatus("");
-    showToast("Could not create room. Try again.", "error");
+
+    showToast(
+      "Could not create the room. Please try again.",
+      "error"
+    );
+  } finally {
+    if (createRoomBtn) {
+      createRoomBtn.disabled = false;
+    }
   }
 }
 
+/* =========================================================
+   JOIN ROOM
+========================================================= */
+
 async function joinRoom() {
-  const username = usernameInput.value.trim();
-  const roomCode = roomCodeInput.value.trim().toUpperCase();
+  const username = usernameInput?.value.trim();
+  const roomCode = roomCodeInput?.value
+    .trim()
+    .toUpperCase();
 
   if (!username) {
     showToast("Please enter your name.", "error");
@@ -475,6 +680,10 @@ async function joinRoom() {
   if (!roomCode) {
     showToast("Please enter the room code.", "error");
     return;
+  }
+
+  if (joinRoomBtn) {
+    joinRoomBtn.disabled = true;
   }
 
   state.username = username;
@@ -487,25 +696,54 @@ async function joinRoom() {
   try {
     await createPeer();
 
-    const connection = state.peer.connect(state.hostPeerId, {
-      reliable: true,
-      serialization: "json"
-    });
+    console.log(
+      "Attempting to connect to host:",
+      state.hostPeerId
+    );
+
+    const connection = state.peer.connect(
+      state.hostPeerId,
+      {
+        reliable: true,
+        serialization: "json"
+      }
+    );
 
     state.connection = connection;
+
     setupConnection(connection);
 
+    let connectionOpened = false;
+
     const connectionTimeout = setTimeout(() => {
-      if (!connection.open) {
-        showToast("Host unreachable. Check the code or internet connection.", "error");
+      if (connectionOpened) return;
+
+      console.error(
+        "Connection timeout. Host was not reached."
+      );
+
+      try {
         connection.close();
-        resetToLobby();
+      } catch (error) {
+        console.warn(error);
       }
-    }, 15000);
+
+      showToast(
+        "Could not reach the host. Confirm the room code and make sure the host still has the room open.",
+        "error"
+      );
+
+      resetToLobby();
+    }, 20000);
 
     connection.on("open", () => {
+      connectionOpened = true;
       clearTimeout(connectionTimeout);
-      setStatus("");
+
+      console.log(
+        "Connected to host successfully:",
+        state.hostPeerId
+      );
 
       connection.send({
         type: "JOIN_REQUEST",
@@ -513,112 +751,256 @@ async function joinRoom() {
         roomCode: state.roomCode
       });
 
-      $("waitingText").textContent = `Your request has been sent to room ${state.roomCode}. Waiting for approval...`;
+      if ($("waitingText")) {
+        $("waitingText").textContent =
+          `Your request has been sent to room ${state.roomCode}. Waiting for host approval...`;
+      }
+
+      setStatus("");
       showScreen("waiting");
+
+      showToast(
+        "Join request sent. Waiting for approval."
+      );
     });
 
-    connection.on("error", (err) => {
+    connection.on("error", (error) => {
       clearTimeout(connectionTimeout);
-      console.error("Join error:", err);
-      showToast("Could not connect to room host.", "error");
+
+      console.error(
+        "Guest connection error:",
+        error
+      );
+
+      showToast(
+        "Could not connect to the host.",
+        "error"
+      );
+
       resetToLobby();
     });
   } catch (error) {
-    console.error("Join room error:", error);
+    console.error("Join room failed:", error);
+
     setStatus("");
-    showToast("Room not found or host is offline.", "error");
+
+    showToast(
+      "Room not found or host is offline.",
+      "error"
+    );
+
     resetToLobby();
+  } finally {
+    if (joinRoomBtn) {
+      joinRoomBtn.disabled = false;
+    }
   }
 }
 
+/* =========================================================
+   JOIN REQUEST / ADMIT / REJECT
+========================================================= */
+
 function handleJoinRequest(payload, connection) {
-  if (!state.isHost) return;
+  console.log(
+    "JOIN REQUEST RECEIVED:",
+    payload,
+    connection?.peer
+  );
+
+  if (!state.isHost) {
+    console.warn(
+      "Received join request, but this peer is not the host."
+    );
+    return;
+  }
+
+  if (!connection) {
+    console.error(
+      "Join request has no connection object."
+    );
+    return;
+  }
 
   state.pendingRequests.set(connection.peer, {
-    username: payload.username,
+    username: payload.username || "Participant",
     connection
   });
 
   renderPendingRequests();
-  showToast(`${payload.username} requested to join.`);
+
+  showToast(
+    `${payload.username || "Someone"} requested to join.`,
+    "success"
+  );
 }
 
 function admitGuest(peerId) {
+  console.log("Admitting guest:", peerId);
+
   const request = state.pendingRequests.get(peerId);
-  if (!request) return;
 
-  state.pendingRequests.delete(peerId);
-  addParticipant(peerId, request.username, false);
+  if (!request) {
+    showToast(
+      "This join request is no longer available.",
+      "error"
+    );
+    return;
+  }
 
-  request.connection.send({
-    type: "JOIN_RESPONSE",
-    approved: true,
-    participants: state.participants
-  });
+  if (
+    !request.connection ||
+    !request.connection.open
+  ) {
+    state.pendingRequests.delete(peerId);
+    renderPendingRequests();
 
-  broadcast({
-    type: "PARTICIPANTS_UPDATE",
-    participants: state.participants
-  });
+    showToast(
+      "The participant disconnected before admission.",
+      "error"
+    );
 
-  renderPendingRequests();
-  showToast(`${request.username} admitted.`, "success");
+    return;
+  }
 
-  // Call guest if media stream is active
-  if (state.localStream) {
-    const call = state.peer.call(peerId, state.localStream);
-    state.calls.set(peerId, call);
-    call.on("stream", (remoteStream) => addRemoteVideo(peerId, remoteStream));
+  try {
+    addParticipant(
+      peerId,
+      request.username,
+      false
+    );
+
+    request.connection.send({
+      type: "JOIN_RESPONSE",
+      approved: true,
+      participants: state.participants
+    });
+
+    state.pendingRequests.delete(peerId);
+
+    broadcast({
+      type: "PARTICIPANTS_UPDATE",
+      participants: state.participants
+    });
+
+    renderPendingRequests();
+
+    showToast(
+      `${request.username} admitted.`,
+      "success"
+    );
+
+    if (state.localStream) {
+      const call = state.peer.call(
+        peerId,
+        state.localStream
+      );
+
+      state.calls.set(peerId, call);
+
+      call.on("stream", (remoteStream) => {
+        addRemoteVideo(
+          peerId,
+          remoteStream
+        );
+      });
+    }
+  } catch (error) {
+    console.error("Admit guest failed:", error);
+
+    showToast(
+      "Could not admit this participant.",
+      "error"
+    );
   }
 }
 
 function rejectGuest(peerId) {
   const request = state.pendingRequests.get(peerId);
+
   if (!request) return;
 
-  request.connection.send({
-    type: "JOIN_RESPONSE",
-    approved: false
-  });
+  try {
+    if (
+      request.connection &&
+      request.connection.open
+    ) {
+      request.connection.send({
+        type: "JOIN_RESPONSE",
+        approved: false
+      });
+    }
+  } catch (error) {
+    console.error("Reject message failed:", error);
+  }
 
-  setTimeout(() => request.connection.close(), 500);
   state.pendingRequests.delete(peerId);
-
   renderPendingRequests();
+
+  setTimeout(() => {
+    try {
+      request.connection?.close();
+    } catch (error) {
+      console.warn(error);
+    }
+  }, 500);
+
   showToast("Request rejected.");
 }
 
 function handleJoinResponse(payload) {
+  console.log("JOIN RESPONSE RECEIVED:", payload);
+
   if (!payload.approved) {
-    showToast("Your request was declined by host.", "error");
+    showToast(
+      "Your request was rejected by the host.",
+      "error"
+    );
+
     resetToLobby();
     return;
   }
 
-  state.participants = payload.participants || [];
+  state.participants = Array.isArray(
+    payload.participants
+  )
+    ? payload.participants
+    : [];
 
-  if (!state.participants.some((p) => p.id === state.peerId)) {
-    state.participants.push({
-      id: state.peerId,
-      name: state.username,
-      isHost: false
-    });
+  addParticipant(
+    state.peerId,
+    state.username,
+    false
+  );
+
+  if ($("currentUserName")) {
+    $("currentUserName").textContent =
+      state.username;
   }
 
-  $("currentUserName").textContent = state.username;
-  $("roomTitle").textContent = `MINGLE Room ${state.roomCode}`;
-  roomCodeDisplay.textContent = state.roomCode;
+  if ($("roomTitle")) {
+    $("roomTitle").textContent =
+      `MINGLE Room ${state.roomCode}`;
+  }
+
+  if (roomCodeDisplay) {
+    roomCodeDisplay.textContent =
+      state.roomCode;
+  }
 
   renderParticipants();
   showScreen("app");
   setupAllFeatures();
 
-  showToast("Welcome to MINGLE!", "success");
+  showToast(
+    "You have been admitted to the room!",
+    "success"
+  );
 }
 
-/* =========================
-   CHAT FEATURE
-========================= */
+/* =========================================================
+   CHAT
+========================================================= */
 
 function setupChat() {
   if (!chatForm) return;
@@ -630,7 +1012,8 @@ function setupChat() {
 }
 
 function sendChatMessage() {
-  const text = messageInput.value.trim();
+  const text = messageInput?.value.trim();
+
   if (!text) return;
 
   const message = {
@@ -665,62 +1048,95 @@ function receiveChatMessage(message) {
 
   state.messages.push(message);
 
-  const messageElement = document.createElement("div");
-  messageElement.className = message.senderId === state.peerId ? "message own-message" : "message";
+  const element = document.createElement("div");
 
-  messageElement.innerHTML = `
-    <div class="message-sender">${escapeHtml(message.sender)}</div>
-    <div class="message-text">${escapeHtml(message.text)}</div>
-    <div class="message-time">${escapeHtml(message.timestamp)}</div>
+  element.className =
+    message.senderId === state.peerId
+      ? "message own-message"
+      : "message";
+
+  element.innerHTML = `
+    <div class="message-sender">
+      ${escapeHtml(message.sender)}
+    </div>
+
+    <div class="message-text">
+      ${escapeHtml(message.text)}
+    </div>
+
+    <div class="message-time">
+      ${escapeHtml(message.timestamp)}
+    </div>
   `;
 
-  messagesContainer.appendChild(messageElement);
-  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  messagesContainer.appendChild(element);
+  messagesContainer.scrollTop =
+    messagesContainer.scrollHeight;
 }
 
-/* =========================
-   NAVIGATION TABS
-========================= */
+/* =========================================================
+   TABS
+========================================================= */
 
 function setupTabs() {
-  const tabButtons = document.querySelectorAll(".tab");
-  const tabPanels = document.querySelectorAll(".tab-panel");
+  const tabButtons =
+    document.querySelectorAll(".tab");
+
+  const tabPanels =
+    document.querySelectorAll(".tab-panel");
 
   tabButtons.forEach((button) => {
     button.onclick = () => {
       const tabName = button.dataset.tab;
 
       tabButtons.forEach((tab) => {
-        tab.classList.toggle("active", tab === button);
+        tab.classList.toggle(
+          "active",
+          tab === button
+        );
       });
 
       tabPanels.forEach((panel) => {
-        panel.classList.toggle("active", panel.id === `${tabName}Tab`);
+        panel.classList.toggle(
+          "active",
+          panel.id === `${tabName}Tab`
+        );
       });
     };
   });
 }
 
-/* =========================
-   CAMERA & MICROPHONE (WEBRTC)
-========================= */
+/* =========================================================
+   CAMERA AND MICROPHONE
+========================================================= */
 
 async function enableCamera() {
   try {
     if (!state.localStream) {
-      state.localStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true
-      });
+      state.localStream =
+        await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true
+        });
 
-      localVideo.srcObject = state.localStream;
-      localVideo.play().catch(() => {});
+      if (localVideo) {
+        localVideo.srcObject =
+          state.localStream;
+
+        localVideo.play().catch(() => {});
+      }
 
       state.cameraEnabled = true;
       state.micEnabled = true;
 
-      cameraBtn.textContent = "Disable Camera";
-      micBtn.textContent = "Disable Mic";
+      if (cameraBtn) {
+        cameraBtn.textContent =
+          "Disable Camera";
+      }
+
+      if (micBtn) {
+        micBtn.textContent = "Disable Mic";
+      }
 
       if (state.isHost) {
         callAllParticipants();
@@ -728,20 +1144,40 @@ async function enableCamera() {
         callHost();
       }
 
-      showToast("Camera and microphone enabled.", "success");
+      showToast(
+        "Camera and microphone enabled.",
+        "success"
+      );
+
       return;
     }
 
-    state.localStream.getVideoTracks().forEach((track) => {
-      track.enabled = !track.enabled;
-      state.cameraEnabled = track.enabled;
-    });
+    state.localStream
+      .getVideoTracks()
+      .forEach((track) => {
+        track.enabled = !track.enabled;
+        state.cameraEnabled = track.enabled;
+      });
 
-    cameraBtn.textContent = state.cameraEnabled ? "Disable Camera" : "Enable Camera";
-    showToast(state.cameraEnabled ? "Camera enabled." : "Camera disabled.");
+    if (cameraBtn) {
+      cameraBtn.textContent =
+        state.cameraEnabled
+          ? "Disable Camera"
+          : "Enable Camera";
+    }
+
+    showToast(
+      state.cameraEnabled
+        ? "Camera enabled."
+        : "Camera disabled."
+    );
   } catch (error) {
-    console.error(error);
-    showToast("Camera permission denied or device not found.", "error");
+    console.error("Camera error:", error);
+
+    showToast(
+      "Camera permission was denied or unavailable.",
+      "error"
+    );
   }
 }
 
@@ -751,37 +1187,88 @@ async function toggleMic() {
     return;
   }
 
-  state.localStream.getAudioTracks().forEach((track) => {
-    track.enabled = !track.enabled;
-    state.micEnabled = track.enabled;
-  });
+  state.localStream
+    .getAudioTracks()
+    .forEach((track) => {
+      track.enabled = !track.enabled;
+      state.micEnabled = track.enabled;
+    });
 
-  micBtn.textContent = state.micEnabled ? "Disable Mic" : "Enable Mic";
-  showToast(state.micEnabled ? "Microphone enabled." : "Microphone disabled.");
+  if (micBtn) {
+    micBtn.textContent =
+      state.micEnabled
+        ? "Disable Mic"
+        : "Enable Mic";
+  }
+
+  showToast(
+    state.micEnabled
+      ? "Microphone enabled."
+      : "Microphone disabled."
+  );
 }
 
 function callHost() {
-  if (!state.peer || !state.localStream || !state.hostPeerId) return;
+  if (
+    !state.peer ||
+    !state.localStream ||
+    !state.hostPeerId
+  ) {
+    return;
+  }
 
-  const call = state.peer.call(state.hostPeerId, state.localStream);
-  state.calls.set(state.hostPeerId, call);
+  const call = state.peer.call(
+    state.hostPeerId,
+    state.localStream
+  );
+
+  state.calls.set(
+    state.hostPeerId,
+    call
+  );
 
   call.on("stream", (remoteStream) => {
-    addRemoteVideo(state.hostPeerId, remoteStream);
+    addRemoteVideo(
+      state.hostPeerId,
+      remoteStream
+    );
+  });
+
+  call.on("error", (error) => {
+    console.error("Host call error:", error);
   });
 }
 
 function callAllParticipants() {
-  if (!state.peer || !state.localStream) return;
+  if (!state.peer || !state.localStream) {
+    return;
+  }
 
   state.connections.forEach((connection) => {
     if (!connection.open) return;
 
-    const call = state.peer.call(connection.peer, state.localStream);
-    state.calls.set(connection.peer, call);
+    const call = state.peer.call(
+      connection.peer,
+      state.localStream
+    );
+
+    state.calls.set(
+      connection.peer,
+      call
+    );
 
     call.on("stream", (remoteStream) => {
-      addRemoteVideo(connection.peer, remoteStream);
+      addRemoteVideo(
+        connection.peer,
+        remoteStream
+      );
+    });
+
+    call.on("error", (error) => {
+      console.error(
+        "Participant call error:",
+        error
+      );
     });
   });
 }
@@ -798,14 +1285,26 @@ function handleIncomingCall(call) {
   state.calls.set(call.peer, call);
 
   call.on("stream", (remoteStream) => {
-    addRemoteVideo(call.peer, remoteStream);
+    addRemoteVideo(
+      call.peer,
+      remoteStream
+    );
+  });
+
+  call.on("error", (error) => {
+    console.error(
+      "Incoming call error:",
+      error
+    );
   });
 }
 
 function addRemoteVideo(peerId, stream) {
   if (!remoteVideos) return;
 
-  let video = document.querySelector(`video[data-peer="${peerId}"]`);
+  let video = document.querySelector(
+    `video[data-peer="${peerId}"]`
+  );
 
   if (!video) {
     const wrapper = document.createElement("div");
@@ -830,30 +1329,45 @@ function addRemoteVideo(peerId, stream) {
 }
 
 function setupMediaControls() {
-  if (cameraBtn) cameraBtn.onclick = enableCamera;
-  if (micBtn) micBtn.onclick = toggleMic;
+  if (cameraBtn) {
+    cameraBtn.onclick = enableCamera;
+  }
+
+  if (micBtn) {
+    micBtn.onclick = toggleMic;
+  }
 }
 
-/* =========================
+/* =========================================================
    SHARED CANVAS
-========================= */
+========================================================= */
 
 function setupCanvas() {
   const canvas = $("canvas");
+
   if (!canvas) return;
 
-  state.canvasContext = canvas.getContext("2d");
+  state.canvasContext =
+    canvas.getContext("2d");
 
   canvas.onmousedown = (event) => {
     state.drawing = true;
+
     state.canvasContext.beginPath();
-    state.canvasContext.moveTo(event.offsetX, event.offsetY);
+    state.canvasContext.moveTo(
+      event.offsetX,
+      event.offsetY
+    );
   };
 
   canvas.onmousemove = (event) => {
     if (!state.drawing) return;
 
-    state.canvasContext.lineTo(event.offsetX, event.offsetY);
+    state.canvasContext.lineTo(
+      event.offsetX,
+      event.offsetY
+    );
+
     state.canvasContext.stroke();
 
     const payload = {
@@ -869,19 +1383,29 @@ function setupCanvas() {
     }
   };
 
-  canvas.onmouseup = () => { state.drawing = false; };
-  canvas.onmouseleave = () => { state.drawing = false; };
+  canvas.onmouseup = () => {
+    state.drawing = false;
+  };
+
+  canvas.onmouseleave = () => {
+    state.drawing = false;
+  };
 }
 
 function drawRemoteCanvas(payload) {
   if (!state.canvasContext) return;
-  state.canvasContext.lineTo(payload.x, payload.y);
+
+  state.canvasContext.lineTo(
+    payload.x,
+    payload.y
+  );
+
   state.canvasContext.stroke();
 }
 
-/* =========================
+/* =========================================================
    SIMPLE GAME
-========================= */
+========================================================= */
 
 function setupGame() {
   const gameBoard = $("gameBoard");
@@ -891,19 +1415,67 @@ function setupGame() {
 
   document.onkeydown = (event) => {
     const key = event.key.toLowerCase();
-    if (!["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(key)) {
-      return;
-    }
+
+    const allowedKeys = [
+      "w",
+      "a",
+      "s",
+      "d",
+      "arrowup",
+      "arrowdown",
+      "arrowleft",
+      "arrowright"
+    ];
+
+    if (!allowedKeys.includes(key)) return;
 
     event.preventDefault();
 
-    if (key === "w" || key === "arrowup") state.gamePosition.y = Math.max(0, state.gamePosition.y - 3);
-    if (key === "s" || key === "arrowdown") state.gamePosition.y = Math.min(100, state.gamePosition.y + 3);
-    if (key === "a" || key === "arrowleft") state.gamePosition.x = Math.max(0, state.gamePosition.x - 3);
-    if (key === "d" || key === "arrowright") state.gamePosition.x = Math.min(100, state.gamePosition.x + 3);
+    if (
+      key === "w" ||
+      key === "arrowup"
+    ) {
+      state.gamePosition.y = Math.max(
+        0,
+        state.gamePosition.y - 3
+      );
+    }
 
-    player.style.left = `${state.gamePosition.x}%`;
-    player.style.top = `${state.gamePosition.y}%`;
+    if (
+      key === "s" ||
+      key === "arrowdown"
+    ) {
+      state.gamePosition.y = Math.min(
+        100,
+        state.gamePosition.y + 3
+      );
+    }
+
+    if (
+      key === "a" ||
+      key === "arrowleft"
+    ) {
+      state.gamePosition.x = Math.max(
+        0,
+        state.gamePosition.x - 3
+      );
+    }
+
+    if (
+      key === "d" ||
+      key === "arrowright"
+    ) {
+      state.gamePosition.x = Math.min(
+        100,
+        state.gamePosition.x + 3
+      );
+    }
+
+    player.style.left =
+      `${state.gamePosition.x}%`;
+
+    player.style.top =
+      `${state.gamePosition.y}%`;
 
     const payload = {
       type: "GAME_UPDATE",
@@ -921,81 +1493,127 @@ function setupGame() {
 }
 
 function updateRemoteGame(payload) {
-  let player = document.querySelector(`[data-player="${payload.peerId}"]`);
+  const gameBoard = $("gameBoard");
 
-  if (!player && $("gameBoard")) {
+  if (!gameBoard) return;
+
+  let player = document.querySelector(
+    `[data-player="${payload.peerId}"]`
+  );
+
+  if (!player) {
     player = document.createElement("div");
+
     player.className = "remote-player";
     player.dataset.player = payload.peerId;
+
     player.style.position = "absolute";
     player.style.width = "20px";
     player.style.height = "20px";
     player.style.backgroundColor = "#e74c3c";
     player.style.borderRadius = "50%";
-    $("gameBoard").appendChild(player);
+
+    gameBoard.appendChild(player);
   }
 
-  if (player) {
-    player.style.left = `${payload.x}%`;
-    player.style.top = `${payload.y}%`;
-  }
+  player.style.left = `${payload.x}%`;
+  player.style.top = `${payload.y}%`;
 }
 
-/* =========================
-   LEAVE & RESET
-========================= */
+/* =========================================================
+   LEAVE / RESET
+========================================================= */
 
 function cancelJoinRequest() {
-  if (state.connection?.open) {
+  if (
+    state.connection &&
+    state.connection.open
+  ) {
     state.connection.send({
       type: "CANCEL_REQUEST",
       username: state.username
     });
   }
+
   resetToLobby();
 }
 
 function leaveRoom() {
   if (state.isHost) {
-    broadcast({ type: "REJECTED" });
+    broadcast({
+      type: "REJECTED"
+    });
   }
 
-  state.connections.forEach((conn) => conn.close());
+  state.connections.forEach((connection) => {
+    try {
+      connection.close();
+    } catch (error) {
+      console.warn(error);
+    }
+  });
+
+  state.calls.forEach((call) => {
+    try {
+      call.close();
+    } catch (error) {
+      console.warn(error);
+    }
+  });
+
   resetToLobby();
 }
 
 function resetToLobby() {
   if (state.localStream) {
-    state.localStream.getTracks().forEach((track) => track.stop());
+    state.localStream
+      .getTracks()
+      .forEach((track) => track.stop());
+
     state.localStream = null;
   }
 
   if (state.peer) {
-    state.peer.destroy();
+    try {
+      state.peer.destroy();
+    } catch (error) {
+      console.warn(error);
+    }
+
     state.peer = null;
   }
 
   state.peerId = null;
   state.hostPeerId = null;
   state.roomCode = "";
+  state.username = "";
   state.isHost = false;
   state.connection = null;
+
   state.connections.clear();
   state.pendingRequests.clear();
   state.participants = [];
   state.messages = [];
   state.calls.clear();
 
-  if (messagesContainer) messagesContainer.innerHTML = "";
-  if (remoteVideos) remoteVideos.innerHTML = "";
+  if (messagesContainer) {
+    messagesContainer.innerHTML = "";
+  }
+
+  if (remoteVideos) {
+    remoteVideos.innerHTML = "";
+  }
+
+  renderParticipants();
+  renderPendingRequests();
 
   setStatus("");
   showScreen("lobby");
 }
 
-/* =========================
+/* =========================================================
    INITIALIZATION
-========================= */
+========================================================= */
 
 function setupAllFeatures() {
   setupChat();
@@ -1006,17 +1624,47 @@ function setupAllFeatures() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  if (createRoomBtn) createRoomBtn.onclick = createRoom;
-  if (joinRoomBtn) joinRoomBtn.onclick = joinRoom;
-  if (cancelRequestBtn) cancelRequestBtn.onclick = cancelJoinRequest;
-  if (leaveRoomBtn) leaveRoomBtn.onclick = leaveRoom;
+  createRoomBtn?.addEventListener(
+    "click",
+    createRoom
+  );
 
-  if (copyRoomBtn) {
-    copyRoomBtn.onclick = () => {
+  joinRoomBtn?.addEventListener(
+    "click",
+    joinRoom
+  );
+
+  cancelRequestBtn?.addEventListener(
+    "click",
+    cancelJoinRequest
+  );
+
+  leaveRoomBtn?.addEventListener(
+    "click",
+    leaveRoom
+  );
+
+  copyRoomBtn?.addEventListener(
+    "click",
+    async () => {
       if (!state.roomCode) return;
-      navigator.clipboard.writeText(state.roomCode).then(() => {
-        showToast("Room code copied!", "success");
-      });
-    };
-  }
+
+      try {
+        await navigator.clipboard.writeText(
+          state.roomCode
+        );
+
+        showToast(
+          "Room code copied!",
+          "success"
+        );
+      } catch (error) {
+        showToast(
+          `Copy this room code manually: ${state.roomCode}`
+        );
+      }
+    }
+  );
+
+  showScreen("lobby");
 });
